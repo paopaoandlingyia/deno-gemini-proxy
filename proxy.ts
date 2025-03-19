@@ -60,6 +60,12 @@ const HTML_CONTENT = `<!DOCTYPE html>
     button.clear:hover {
       background-color: #c53929;
     }
+    button.test {
+      background-color: #fbbc04;
+    }
+    button.test:hover {
+      background-color: #f9ab00;
+    }
     .switch {
       position: relative;
       display: inline-block;
@@ -181,6 +187,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
       <span class="status">调试模式：<span id="debugStatus">关闭</span></span>
       
       <button class="clear" id="clearLogs">清除日志</button>
+      <button class="test" id="testRequest">发送测试请求</button>
       <input type="text" class="filter" id="logFilter" placeholder="过滤关键词...">
     </div>
     
@@ -200,6 +207,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
     const debugToggle = document.getElementById('debugToggle');
     const debugStatus = document.getElementById('debugStatus');
     const clearLogsBtn = document.getElementById('clearLogs');
+    const testRequestBtn = document.getElementById('testRequest');
     const logFilter = document.getElementById('logFilter');
     const connectionStatus = document.getElementById('connectionStatus');
     const connectionIndicator = document.getElementById('connectionIndicator');
@@ -219,6 +227,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
         connectionIndicator.classList.add('connected');
         // 连接后请求当前状态
         ws.send(JSON.stringify({ type: 'getStatus' }));
+        console.log("WebSocket已连接，发送状态请求");
       };
       
       ws.onclose = () => {
@@ -232,6 +241,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
       };
       
       ws.onmessage = (event) => {
+        console.log("收到服务器消息", event.data);
         const data = JSON.parse(event.data);
         
         switch(data.type) {
@@ -242,6 +252,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             }
             break;
           case 'status':
+            console.log("收到状态更新", data);
             updateDebugStatus(data.debugMode);
             logs = data.logs || [];
             renderLogs();
@@ -249,6 +260,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
             requestCounter.textContent = \`请求数: \${requestCount}\`;
             break;
           case 'debugUpdate':
+            console.log("收到调试模式更新", data);
             updateDebugStatus(data.debugMode);
             break;
           case 'clearLogs':
@@ -260,6 +272,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
     }
     
     function updateDebugStatus(isEnabled) {
+      console.log("更新调试状态UI", isEnabled);
       debugToggle.checked = isEnabled;
       debugStatus.textContent = isEnabled ? '开启' : '关闭';
     }
@@ -301,6 +314,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
     
     // 事件监听
     debugToggle.addEventListener('change', () => {
+      console.log("调试开关切换为", debugToggle.checked);
       ws.send(JSON.stringify({
         type: 'setDebug',
         enabled: debugToggle.checked
@@ -311,9 +325,16 @@ const HTML_CONTENT = `<!DOCTYPE html>
       ws.send(JSON.stringify({ type: 'clearLogs' }));
     });
     
+    // 添加测试请求按钮事件
+    testRequestBtn.addEventListener('click', () => {
+      console.log("发送测试请求");
+      ws.send(JSON.stringify({ type: 'testRequest' }));
+    });
+    
     logFilter.addEventListener('input', renderLogs);
     
     // 初始连接
+    console.log("页面加载完成，开始WebSocket连接");
     connectWebSocket();
   </script>
 </body>
@@ -336,6 +357,24 @@ function broadcastLog(category: string, content: string) {
   for (const client of webSocketClients) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
+    }
+  }
+}
+
+// 辅助函数：发送状态更新到所有客户端
+function broadcastStatus() {
+  const statusMessage = JSON.stringify({
+    type: 'status',
+    debugMode: isDebugMode,
+    logs: logEntries,
+    requestCount: logEntries.filter(entry => entry.category === 'request').length
+  });
+  
+  console.log(`广播状态更新: 调试模式=${isDebugMode}`);
+  
+  for (const client of webSocketClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(statusMessage);
     }
   }
 }
@@ -383,7 +422,10 @@ async function logData(label: string, data: Request | Response) {
 async function handleWebSocket(request: Request): Promise<Response> {
   const { socket, response } = Deno.upgradeWebSocket(request);
   
+  console.log("WebSocket连接已建立");
+  
   socket.onopen = () => {
+    console.log("WebSocket已打开，添加到客户端列表");
     webSocketClients.add(socket);
     
     // 发送当前状态到新连接的客户端
@@ -396,27 +438,28 @@ async function handleWebSocket(request: Request): Promise<Response> {
   };
   
   socket.onclose = () => {
+    console.log("WebSocket已关闭，从客户端列表移除");
     webSocketClients.delete(socket);
   };
   
   socket.onmessage = (event) => {
     try {
+      console.log("收到WebSocket消息:", event.data);
       const message = JSON.parse(event.data);
       
       switch (message.type) {
         case 'setDebug':
+          console.log(`调试模式状态变更: ${isDebugMode} -> ${message.enabled}`);
           isDebugMode = message.enabled;
+          
+          // 添加一条状态变更日志
+          broadcastLog('system', `<strong>调试模式已${isDebugMode ? '开启' : '关闭'}</strong>`);
+          
           // 通知所有客户端调试状态变更
-          for (const client of webSocketClients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({
-                type: 'debugUpdate',
-                debugMode: isDebugMode
-              }));
-            }
-          }
+          broadcastStatus();
           break;
         case 'clearLogs':
+          console.log("清除所有日志");
           logEntries.length = 0;
           // 通知所有客户端清空日志
           for (const client of webSocketClients) {
@@ -426,6 +469,7 @@ async function handleWebSocket(request: Request): Promise<Response> {
           }
           break;
         case 'getStatus':
+          console.log("发送当前状态");
           socket.send(JSON.stringify({
             type: 'status',
             debugMode: isDebugMode,
@@ -433,6 +477,13 @@ async function handleWebSocket(request: Request): Promise<Response> {
             requestCount: logEntries.filter(entry => entry.category === 'request').length
           }));
           break;
+        case 'testRequest':
+          // 添加测试请求功能
+          console.log("收到测试请求命令");
+          broadcastLog('info', '<strong>手动测试请求</strong><br>这是一个模拟的API请求');
+          break;
+        default:
+          console.log(`未知消息类型: ${message.type}`);
       }
     } catch (e) {
       console.error("Error processing WebSocket message:", e);
@@ -541,10 +592,30 @@ async function handleRequest(request: Request): Promise<Response> {
 console.log(`调试面板可在 http://localhost:8080/debug 访问`);
 console.log(`调试模式: ${isDebugMode ? '已启用' : '已禁用'}`);
 
-// 添加初始测试日志
+// 添加初始测试日志和模拟请求
 setTimeout(() => {
   console.log("添加初始测试日志");
   broadcastLog('info', '<strong>系统测试</strong><br>如果您能看到此消息，WebSocket连接正常工作');
+  
+  // 再添加一条模拟的API请求日志
+  setTimeout(() => {
+    if (webSocketClients.size > 0) {
+      console.log("添加模拟请求日志");
+      broadcastLog('request', `<strong>模拟请求示例</strong><br>
+      <strong>Headers:</strong><pre>{"Content-Type": "application/json"}</pre>
+      <strong>Body:</strong><pre>{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "你好，请介绍一下自己"
+        }
+      ]
+    }
+  ]
+}</pre>`);
+    }
+  }, 2000);
 }, 5000);
 
 serve(handleRequest, { port: 8080 }); 
