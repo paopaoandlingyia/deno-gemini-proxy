@@ -332,6 +332,7 @@ function broadcastLog(category: string, content: string) {
   
   // 广播到所有连接的客户端
   const message = JSON.stringify(logEntry);
+  console.log(`正在广播消息到 ${webSocketClients.size} 个客户端`);
   for (const client of webSocketClients) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
@@ -444,8 +445,11 @@ async function handleWebSocket(request: Request): Promise<Response> {
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   
+  console.log(`收到请求: ${request.method} ${url.pathname}`);
+  
   // 处理Web界面请求
   if (url.pathname === "/debug") {
+    console.log("提供调试界面");
     return new Response(HTML_CONTENT, {
       headers: { "Content-Type": "text/html" }
     });
@@ -453,15 +457,25 @@ async function handleRequest(request: Request): Promise<Response> {
   
   // 处理WebSocket连接
   if (url.pathname === "/ws") {
-    return handleWebSocket(request);
+    console.log("处理WebSocket连接请求");
+    try {
+      return handleWebSocket(request);
+    } catch (e) {
+      console.error("WebSocket连接错误:", e);
+      return new Response("WebSocket Error: " + e.message, { status: 500 });
+    }
   }
   
   // 处理API反向代理
+  console.log(`代理请求到: ${target}${url.pathname}`);
   const targetUrl = new URL(target + url.pathname + url.search);
 
   // 记录收到的请求
   if (isDebugMode) {
+    console.log("调试模式已启用，记录请求");
     await logData("收到的客户端请求", request);
+  } else {
+    console.log("调试模式未启用，跳过日志记录");
   }
 
   // 构建新的请求
@@ -526,4 +540,11 @@ async function handleRequest(request: Request): Promise<Response> {
 // 启动服务器
 console.log(`调试面板可在 http://localhost:8080/debug 访问`);
 console.log(`调试模式: ${isDebugMode ? '已启用' : '已禁用'}`);
+
+// 添加初始测试日志
+setTimeout(() => {
+  console.log("添加初始测试日志");
+  broadcastLog('info', '<strong>系统测试</strong><br>如果您能看到此消息，WebSocket连接正常工作');
+}, 5000);
+
 serve(handleRequest, { port: 8080 }); 
