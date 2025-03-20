@@ -419,6 +419,22 @@ async function logData(label: string, data: Request | Response) {
   // 剩余的控制台日志逻辑保持不变...
 }
 
+// 记录特殊请求，无视调试模式状态
+async function logSpecialRequest(label: string, data: Request | Response) {
+  console.log("强制记录特殊请求");
+  
+  // 临时启用调试模式
+  const originalDebugMode = isDebugMode;
+  isDebugMode = true;
+  
+  try {
+    await logData(`[强制记录] ${label}`, data);
+  } finally {
+    // 恢复原始调试模式状态
+    isDebugMode = originalDebugMode;
+  }
+}
+
 async function handleWebSocket(request: Request): Promise<Response> {
   const { socket, response } = Deno.upgradeWebSocket(request);
   
@@ -498,6 +514,25 @@ async function handleRequest(request: Request): Promise<Response> {
   
   console.log(`收到请求: ${request.method} ${url.pathname}`);
   
+  // 检查请求头和特征
+  const userAgent = request.headers.get('user-agent') || '';
+  const contentType = request.headers.get('content-type') || '';
+  const origin = request.headers.get('origin') || '';
+  
+  // 强制记录特定的请求以便调试
+  const shouldForceLog = 
+    // 如果路径包含特定的API调用
+    url.pathname.includes('/v1beta/models/gemini') || 
+    // Node.js相关的请求
+    userAgent.includes('node-fetch') ||
+    // 特定的API调用
+    url.pathname.includes('generateContent');
+  
+  console.log(`请求分析: 路径=${url.pathname}, UA=${userAgent.substring(0, 30)}, 内容类型=${contentType}, 源=${origin}`);
+  
+  // 记录特殊请求头以便调试
+  console.log("请求头:", JSON.stringify(Object.fromEntries([...request.headers])));
+  
   // 处理Web界面请求
   if (url.pathname === "/debug") {
     console.log("提供调试界面");
@@ -522,9 +557,14 @@ async function handleRequest(request: Request): Promise<Response> {
   const targetUrl = new URL(target + url.pathname + url.search);
 
   // 记录收到的请求
-  if (isDebugMode) {
-    console.log("调试模式已启用，记录请求");
-    await logData("收到的客户端请求", request);
+  if (isDebugMode || shouldForceLog) {
+    if (shouldForceLog) {
+      console.log("发现需要强制记录的请求");
+      await logSpecialRequest("收到的客户端特殊请求", request);
+    } else {
+      console.log("调试模式已启用，记录请求");
+      await logData("收到的客户端请求", request);
+    }
   } else {
     console.log("调试模式未启用，跳过日志记录");
   }
@@ -554,15 +594,23 @@ async function handleRequest(request: Request): Promise<Response> {
   // 发送请求到目标服务器
   try {
     // 记录发送到Google的请求
-    if (isDebugMode) {
-      await logData("发送到Google的请求", newRequest);
+    if (isDebugMode || shouldForceLog) {
+      if (shouldForceLog) {
+        await logSpecialRequest("发送到Google的特殊请求", newRequest);
+      } else {
+        await logData("发送到Google的请求", newRequest);
+      }
     }
     
     const response = await fetch(newRequest);
     
     // 记录来自Google的响应
-    if (isDebugMode) {
-      await logData("来自Google的响应", response);
+    if (isDebugMode || shouldForceLog) {
+      if (shouldForceLog) {
+        await logSpecialRequest("来自Google的特殊响应", response);
+      } else {
+        await logData("来自Google的响应", response);
+      }
     }
 
     // 创建新的响应头，先复制原始响应头
@@ -587,7 +635,7 @@ async function handleRequest(request: Request): Promise<Response> {
 
   } catch (error) {
     console.error("Error during fetch:", error);
-    if (isDebugMode) {
+    if (isDebugMode || shouldForceLog) {
       broadcastLog('error', `<strong>错误：</strong><pre>${error.message || '未知错误'}</pre>`);
     }
     return new Response("Internal Server Error", { status: 500 });
