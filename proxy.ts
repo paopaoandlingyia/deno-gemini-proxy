@@ -538,11 +538,11 @@ async function handleRequest(request: Request): Promise<Response> {
   });
     
   // 设置访问权限
-  const corsHeaders = new Headers({
+  const corsHeaders = {
     "Access-Control-Allow-Origin": "*", // 允许所有来源, 生产环境应限制
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", // 允许的方法
     "Access-Control-Allow-Headers": "Content-Type, Authorization", // 允许的头部
-  });
+  };
 
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -565,16 +565,22 @@ async function handleRequest(request: Request): Promise<Response> {
       await logData("来自Google的响应", response);
     }
 
-    // 复制响应，并添加 CORS 头部
+    // 创建新的响应头，先复制原始响应头
+    const newHeaders = new Headers(response.headers);
+    
+    // 确保删除任何可能已存在的CORS头，避免重复
+    for (const key of Object.keys(corsHeaders)) {
+      if (newHeaders.has(key)) {
+        newHeaders.delete(key);
+      }
+      newHeaders.set(key, corsHeaders[key]);
+    }
+
+    // 复制响应，使用新的不重复的头部
     const newResponse = new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: new Headers(response.headers),
-    });
-      
-    // 为每个回复都加上访问权限
-    corsHeaders.forEach((value, key) => {
-      newResponse.headers.append(key, value);
+      headers: newHeaders,
     });
 
     return newResponse;
