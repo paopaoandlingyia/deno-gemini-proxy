@@ -520,13 +520,8 @@ async function handleRequest(request: Request): Promise<Response> {
   const origin = request.headers.get('origin') || '';
   
   // 强制记录特定的请求以便调试
-  const shouldForceLog = 
-    // 如果路径包含特定的API调用
-    url.pathname.includes('/v1beta/models/gemini') || 
-    // Node.js相关的请求
-    userAgent.includes('node-fetch') ||
-    // 特定的API调用
-    url.pathname.includes('generateContent');
+  // 记录所有请求
+  const shouldForceLog = true;  // 始终强制记录所有请求
   
   console.log(`请求分析: 路径=${url.pathname}, UA=${userAgent.substring(0, 30)}, 内容类型=${contentType}, 源=${origin}`);
   
