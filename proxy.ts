@@ -636,34 +636,71 @@ async function handleProxy(request: Request): Promise<Response> {
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  const method = request.method;
   
-  // API和主页请求处理保持不变
-  if (path.startsWith("/api/") || path === "/" || path === "") {
-    // 原有逻辑...
+  console.log(`收到请求: ${method} ${path}`);
+  
+  // 处理OPTIONS请求
+  if (method === "OPTIONS") {
+    return handleOptionsRequest();
   }
   
+  // ===== 主页 - 提供可视化界面 =====
+  if (path === "/" || path === "") {
+    console.log("提供主页界面");
+    return new Response(getHtmlIndex(), {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
+  }
+  
+  // ===== API请求处理 =====
+  if (path.startsWith("/api/")) {
+    // 调试API
+    if (path.startsWith("/api/debug/")) {
+      return handleDebugApi(request, path);
+    }
+    
+    // 日志API
+    if (path === "/api/logs") {
+      return handleLogsApi(request);
+    }
+    
+    // 未找到API路由
+    return new Response(JSON.stringify({ error: "未找到API路由" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  
+  // ===== 代理请求处理 =====
   // 复制请求信息用于日志记录
-  const method = request.method;
   const headers = Object.fromEntries(request.headers.entries());
   const clientIP = request.headers.get("x-forwarded-for") || "unknown";
+  
+  // 克隆请求用于后续日志记录
+  let requestClone;
+  try {
+    requestClone = request.clone();
+  } catch (e) {
+    console.error("克隆请求失败:", e);
+  }
   
   // 先直接转发请求，不尝试读取请求体
   const proxyResponse = await handleProxy(request);
   
   // 如果处于调试模式，异步记录请求（不影响响应返回）
-  if (state.isDebugMode && method !== "GET" && method !== "HEAD") {
+  if (state.isDebugMode && requestClone && method !== "GET" && method !== "HEAD") {
     // 创建一个延迟执行的任务，异步读取请求体
     (async () => {
       try {
-        // 尝试克隆请求并读取请求体
-        const clonedRequest = request.clone();
-        const bodyText = await clonedRequest.text().catch(() => "");
+        // 尝试读取请求体
+        const bodyText = await requestClone.text().catch(() => "");
         
         // 创建日志条目
         const timestamp = Date.now();
         const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
         
-        // 即使无法读取请求体，也记录请求信息
+        // 记录请求信息
         const logEntry: RequestLog = {
           id: requestId,
           timestamp,
@@ -682,7 +719,7 @@ async function handleRequest(request: Request): Promise<Response> {
           state.logs = state.logs.slice(0, MAX_LOGS);
         }
         
-        console.log(`异步保存请求日志: ${requestId}`);
+        console.log(`异步保存请求日志: ${requestId}, 路径: ${path}`);
         if (bodyText) {
           logFullContent("请求体(异步获取)", bodyText);
         }
@@ -690,6 +727,30 @@ async function handleRequest(request: Request): Promise<Response> {
         console.error("异步记录请求失败:", error);
       }
     })();
+  } else if (state.isDebugMode) {
+    // GET/HEAD请求直接记录，无需请求体
+    const timestamp = Date.now();
+    const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
+    
+    const logEntry: RequestLog = {
+      id: requestId,
+      timestamp,
+      method,
+      url: request.url,
+      path,
+      headers,
+      body: "",
+      clientIP
+    };
+    
+    state.logs.unshift(logEntry);
+    
+    // 保持日志数不超过最大值
+    if (state.logs.length > MAX_LOGS) {
+      state.logs = state.logs.slice(0, MAX_LOGS);
+    }
+    
+    console.log(`保存GET/HEAD请求日志: ${requestId}, 路径: ${path}`);
   }
   
   // 立即返回代理响应
