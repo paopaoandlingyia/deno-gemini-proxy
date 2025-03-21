@@ -646,18 +646,35 @@ async function handleRequest(request: Request): Promise<Response> {
     return handleOptionsRequest();
   }
   
-  // 处理API请求或主页请求
-  if (path.startsWith("/api/") || path === "/" || path === "") {
-    // 保持原有处理逻辑...
+  // 主页 - 提供可视化界面
+  if (path === "/" || path === "") {
+    return new Response(getHtmlIndex(), {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
+  }
+  
+  // 处理API请求
+  if (path.startsWith("/api/")) {
+    // 调试API
     if (path.startsWith("/api/debug/")) {
       return handleDebugApi(request, path);
     }
-    // ...其他API和主页处理
+    
+    // 日志API
+    if (path === "/api/logs") {
+      return handleLogsApi(request);
+    }
+    
+    // 未找到API路由
+    return new Response(JSON.stringify({ error: "未找到API路由" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" }
+    });
   }
   
-  // ===== 关键修改：先复制请求数据，再处理转发 =====
-  let requestBodyForLogging = ""; // 用于日志记录的请求体
-  let requestForProxy = request;  // 用于代理转发的请求
+  // ===== 处理请求体捕获和代理转发 =====
+  let requestBodyForLogging = "";
+  let requestForProxy = request;
   
   // 处理非GET/HEAD请求体捕获
   if (state.isDebugMode && method !== "GET" && method !== "HEAD") {
