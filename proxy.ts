@@ -525,14 +525,14 @@ async function handleRequest(request: Request): Promise<Response> {
   console.log(`收到请求: ${request.method} ${url.pathname}`);
   
   // 立即克隆并缓冲请求体
-  const requestClone = request.clone(); [!code ++]
-  let requestBodyText = ""; [!code ++]
-  try { [!code ++]
-    requestBodyText = await requestClone.text(); [!code ++]
-    console.log("成功读取请求体，长度:", requestBodyText.length); [!code ++]
-  } catch (e) { [!code ++]
-    console.error("读取请求体失败:", e); [!code ++]
-  } [!code ++]
+  const requestClone = request.clone(); 
+  let requestBodyText = ""; 
+  try { 
+    requestBodyText = await requestClone.text(); 
+    console.log("成功读取请求体，长度:", requestBodyText.length); 
+  } catch (e) { 
+    console.error("读取请求体失败:", e); 
+  } 
   
   // 规范化路径处理
   const normalizedPath = url.pathname.replace(/\/{2,}/g, '/');
@@ -566,11 +566,11 @@ async function handleRequest(request: Request): Promise<Response> {
   }
   
   // 使用缓冲后的请求体创建可记录的请求对象
-  const loggableRequest = new Request(request.url, { [!code ++]
-    method: request.method, [!code ++]
-    headers: request.headers, [!code ++]
-    body: requestBodyText || null [!code ++]
-  }); [!code ++]
+  const loggableRequest = new Request(request.url, { 
+    method: request.method, 
+    headers: request.headers, 
+    body: requestBodyText || null 
+  }); 
   
   // 记录可记录的请求对象
   await logSpecialRequest("收到的客户端请求", loggableRequest);
@@ -583,7 +583,7 @@ async function handleRequest(request: Request): Promise<Response> {
   const newRequest = new Request(targetUrl.toString(), {
     method: request.method,
     headers: request.headers,
-    body: requestBodyText || null, [!code ++]
+    body: requestBodyText || null, 
     redirect: "manual"
   });
     
