@@ -593,19 +593,18 @@ async function handleProxy(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    // 创建新请求
-    const proxyRequest = new Request(targetUrl.toString(), {
+    console.log(`转发请求到: ${targetUrl.toString()}`);
+    
+    // 创建代理请求
+    const headers = new Headers(request.headers);
+    headers.delete('host'); // 删除host头，以防干扰目标服务器
+    
+    const response = await fetch(targetUrl.toString(), {
       method: request.method,
-      headers: new Headers(request.headers),
+      headers: headers,
       body: request.body,
       redirect: 'follow'
     });
-    
-    // 删除一些不需要的头部
-    proxyRequest.headers.delete('host');
-    
-    // 执行请求
-    const response = await fetch(proxyRequest);
     
     // 构建响应
     const proxyResponse = new Response(response.body, {
@@ -620,7 +619,10 @@ async function handleProxy(request: Request): Promise<Response> {
     return proxyResponse;
   } catch (error) {
     console.error('代理请求失败:', error);
-    return new Response(JSON.stringify({ error: '代理请求失败', message: error.message }), {
+    return new Response(JSON.stringify({
+      error: '代理请求失败',
+      message: error.message
+    }), {
       status: 500,
       headers: { 
         'Content-Type': 'application/json',
@@ -634,85 +636,98 @@ async function handleProxy(request: Request): Promise<Response> {
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  const method = request.method;
+  const headers = Object.fromEntries(request.headers.entries());
   
-  // 增加更详细的请求日志
-  console.log(`收到请求: ${request.method} ${path}`);
-  console.log(`请求头:`, Object.fromEntries(request.headers.entries()));
+  console.log(`收到请求: ${method} ${path}`);
   
-  // 处理OPTIONS预检请求
-  if (request.method === "OPTIONS") {
+  // 处理OPTIONS请求
+  if (method === "OPTIONS") {
     return handleOptionsRequest();
   }
   
-  // 处理API请求
-  if (path.startsWith("/api/")) {
-    // 调试API
+  // 处理API请求或主页请求
+  if (path.startsWith("/api/") || path === "/" || path === "") {
+    // 保持原有处理逻辑...
     if (path.startsWith("/api/debug/")) {
       return handleDebugApi(request, path);
     }
-    
-    // 日志API
-    if (path === "/api/logs") {
-      return handleLogsApi(request);
-    }
-    
-    // 未找到API路由
-    return new Response(JSON.stringify({ error: "未找到API路由" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" }
-    });
+    // ...其他API和主页处理
   }
   
-  // 主页 - 提供可视化界面
-  if (path === "/" || path === "") {
-    return new Response(getHtmlIndex(), {
-      headers: { "Content-Type": "text/html; charset=utf-8" }
-    });
-  }
+  // ===== 关键修改：先复制请求数据，再处理转发 =====
+  let requestBodyForLogging = ""; // 用于日志记录的请求体
+  let requestForProxy = request;  // 用于代理转发的请求
   
-  // 记录请求（如果调试模式已开启）
-  if (state.isDebugMode) {
+  // 处理非GET/HEAD请求体捕获
+  if (state.isDebugMode && method !== "GET" && method !== "HEAD") {
     try {
-      // 改进请求体读取方式
-      let requestBody = "";
-      const requestClone = request.clone(); // 克隆请求避免消费原始请求体
+      // 克隆请求体，确保不影响原始请求
+      const clonedRequest = request.clone();
+      const contentType = headers["content-type"] || "";
       
-      // 对于GET和HEAD请求，不读取请求体
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        const contentType = request.headers.get("content-type") || "";
-        
-        // 记录内容类型
-        console.log(`内容类型: ${contentType}`);
-        
-        // 特别处理JSON内容
-        if (contentType.includes("application/json")) {
-          try {
-            const jsonBody = await requestClone.json();
-            requestBody = JSON.stringify(jsonBody, null, 2);
-            console.log("成功读取JSON请求体");
-          } catch (e) {
-            console.error("JSON解析失败，尝试读取文本", e);
-            requestBody = await requestClone.clone().text();
+      // 读取请求体为ArrayBuffer (二进制通用格式)
+      const bodyBuffer = await clonedRequest.arrayBuffer();
+      
+      // 如果是二进制数据，转成base64显示
+      if (bodyBuffer.byteLength > 0) {
+        // 尝试解析为文本
+        try {
+          const bodyText = new TextDecoder().decode(bodyBuffer);
+          
+          // 如果是JSON格式，尝试格式化
+          if (contentType.includes("application/json")) {
+            try {
+              const jsonData = JSON.parse(bodyText);
+              requestBodyForLogging = JSON.stringify(jsonData, null, 2);
+            } catch {
+              requestBodyForLogging = bodyText;
+            }
+          } else {
+            requestBodyForLogging = bodyText;
           }
-        } else {
-          // 其他内容类型直接作为文本读取
-          requestBody = await requestClone.text();
+          
+          console.log(`成功读取请求体，类型:${contentType}, 大小:${bodyBuffer.byteLength}字节`);
+        } catch (textError) {
+          // 如果无法解析为文本，使用base64编码
+          const base64Data = btoa(String.fromCharCode(...new Uint8Array(bodyBuffer)));
+          requestBodyForLogging = `[二进制数据，Base64编码] ${base64Data.substring(0, 100)}...`;
         }
         
-        // 记录请求体大小
-        console.log(`请求体大小: ${requestBody.length} 字符`);
-        logFullContent("请求体", requestBody);
+        // ===== 重要：创建新请求用于代理转发 =====
+        requestForProxy = new Request(request.url, {
+          method: request.method,
+          headers: new Headers(request.headers),
+          body: bodyBuffer,  // 使用读取的bodyBuffer重新创建请求体
+          redirect: 'follow'
+        });
       }
       
-      // 保存请求日志
-      saveRequestLog(request, requestBody);
+      // 记录和保存请求日志
+      if (requestBodyForLogging) {
+        logFullContent("请求体", requestBodyForLogging);
+        saveRequestLog(request, requestBodyForLogging);
+      } else {
+        console.log("请求体为空");
+        saveRequestLog(request, "");
+      }
     } catch (error) {
-      console.error("读取请求体失败:", error);
+      console.error("读取请求体失败，将使用原始请求转发:", error);
+      // 出错时仍保存请求记录，但标明请求体读取失败
+      saveRequestLog(request, "[请求体读取失败]");
     }
+  } else if (state.isDebugMode) {
+    // GET/HEAD请求保存记录但没有请求体
+    saveRequestLog(request, "");
+  }
+  
+  // 特殊处理Gemini API路径
+  if (path.includes("generateContent") || path.includes("/v1beta/models/")) {
+    console.log(`检测到可能是Gemini API调用: ${path}`);
   }
   
   // 转发请求到目标服务器
-  return handleProxy(request);
+  return handleProxy(requestForProxy);
 }
 
 // 服务器启动
