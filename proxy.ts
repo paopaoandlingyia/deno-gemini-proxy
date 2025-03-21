@@ -1,665 +1,707 @@
-import { serve } from "https://deno.land/std@0.210.0/http/server.ts";
+/// <reference lib="deno.unstable" />
+import { serve } from "https://deno.land/std@0.220.1/http/server.ts";
 
-const target = "https://generativelanguage.googleapis.com";
-// 全局变量，存储调试状态和日志
-let isDebugMode = Deno.env.get("DEBUG") === "true";
-const logEntries: any[] = [];
-const webSocketClients = new Set<WebSocket>();
+// 配置
+const TARGET_URL = Deno.env.get("TARGET_URL") || "https://generativelanguage.googleapis.com"; // 默认反代目标
+const MAX_LOGS = 100; // 最大保存日志数量
 
-// HTML 界面
-const HTML_CONTENT = `<!DOCTYPE html>
-<html lang="zh">
+// 请求日志存储
+interface RequestLog {
+  id: string;
+  timestamp: number;
+  method: string;
+  url: string;
+  path: string;
+  headers: Record<string, string>;
+  body: string;
+  clientIP: string;
+}
+
+// 全局状态
+const state = {
+  isDebugMode: false, // 默认关闭调试模式
+  logs: [] as RequestLog[], // 日志存储
+  startTime: 0, // 调试模式开始时间
+};
+
+// 添加分段日志函数
+function logFullContent(prefix: string, content: string) {
+  console.log(`${prefix} 开始 >>>>>>>>`);
+  
+  // 每段最大长度
+  const chunkSize = 1000;
+  const chunks = Math.ceil(content.length / chunkSize);
+  
+  for(let i = 0; i < chunks; i++) {
+    const start = i * chunkSize;
+    const end = Math.min((i + 1) * chunkSize, content.length);
+    console.log(`[第${i+1}/${chunks}段] ${content.slice(start, end)}`);
+  }
+  
+  console.log(`${prefix} 结束 <<<<<<<< (总长度: ${content.length})`);
+}
+
+// 保存请求日志到内存
+function saveRequestLog(request: Request, requestBody: string) {
+  if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
+  
+  const timestamp = Date.now();
+  const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
+  const url = new URL(request.url);
+  
+  const logEntry: RequestLog = {
+    id: requestId,
+    timestamp,
+    method: request.method,
+    url: request.url,
+    path: url.pathname,
+    headers: Object.fromEntries(request.headers.entries()),
+    body: requestBody,
+    clientIP: request.headers.get("x-forwarded-for") || "unknown"
+  };
+  
+  // 添加到日志数组前面
+  state.logs.unshift(logEntry);
+  
+  // 保持日志数不超过最大值
+  if (state.logs.length > MAX_LOGS) {
+    state.logs = state.logs.slice(0, MAX_LOGS);
+  }
+  
+  console.log(`保存请求日志: ${requestId}`);
+  return requestId;
+}
+
+// 清除所有请求日志
+function clearAllRequestLogs(): boolean {
+  try {
+    state.logs = [];
+    console.log("已清除所有请求日志");
+    return true;
+  } catch (error) {
+    console.error("清除请求日志失败:", error);
+    return false;
+  }
+}
+
+// 处理OPTIONS预检请求
+function handleOptionsRequest(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS, PUT, PATCH",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, x-goog-api-key",
+      "Access-Control-Max-Age": "86400",
+    }
+  });
+}
+
+// HTML首页
+function getHtmlIndex(): string {
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gemini API 代理调试器</title>
+  <title>请求调试器</title>
   <style>
     body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      margin: 0;
-      padding: 20px;
-      background-color: #f5f5f5;
-    }
-    .container {
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      line-height: 1.6;
+      color: #333;
       max-width: 1200px;
       margin: 0 auto;
-      background: white;
-      border-radius: 8px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
       padding: 20px;
     }
     h1 {
-      color: #333;
-      border-bottom: 1px solid #eee;
-      padding-bottom: 10px;
-      margin-top: 0;
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .status-bar {
+      background-color: #f8f8f8;
+      border-radius: 4px;
+      padding: 15px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .status-indicator {
+      display: flex;
+      align-items: center;
+    }
+    .status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background-color: #999;
+      margin-right: 8px;
+    }
+    .status-dot.active {
+      background-color: #4CAF50;
+    }
+    .status-info {
+      font-size: 0.9em;
+      color: #666;
     }
     .controls {
       display: flex;
-      gap: 10px;
+      justify-content: space-between;
       margin-bottom: 20px;
-      align-items: center;
-      flex-wrap: wrap;
     }
     button {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 4px;
-      background-color: #4285f4;
+      background-color: #4CAF50;
       color: white;
+      border: none;
+      padding: 10px 15px;
+      text-align: center;
+      text-decoration: none;
+      display: inline-block;
+      font-size: 16px;
+      margin: 4px 2px;
       cursor: pointer;
-      font-weight: 500;
+      border-radius: 4px;
       transition: background-color 0.3s;
     }
     button:hover {
-      background-color: #3367d6;
+      background-color: #45a049;
     }
-    button.clear {
-      background-color: #db4437;
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
     }
-    button.clear:hover {
-      background-color: #c53929;
+    button.delete {
+      background-color: #f44336;
     }
-    button.test {
-      background-color: #fbbc04;
+    button.delete:hover {
+      background-color: #d32f2f;
     }
-    button.test:hover {
-      background-color: #f9ab00;
+    button.toggle-off {
+      background-color: #2196F3;
     }
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 60px;
-      height: 34px;
+    button.toggle-off:hover {
+      background-color: #0b7dda;
     }
-    .switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
+    .log-list {
+      margin-bottom: 20px;
     }
-    .slider {
-      position: absolute;
-      cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #ccc;
-      transition: .4s;
-      border-radius: 34px;
-    }
-    .slider:before {
-      position: absolute;
-      content: "";
-      height: 26px;
-      width: 26px;
-      left: 4px;
-      bottom: 4px;
-      background-color: white;
-      transition: .4s;
-      border-radius: 50%;
-    }
-    input:checked + .slider {
-      background-color: #34a853;
-    }
-    input:checked + .slider:before {
-      transform: translateX(26px);
-    }
-    .status {
-      font-weight: 500;
-      margin-left: 10px;
-    }
-    #logs {
-      border: 1px solid #eee;
+    .log-item {
+      border: 1px solid #ddd;
       padding: 15px;
-      border-radius: 4px;
-      height: 500px;
-      overflow-y: auto;
-      background-color: #f9f9f9;
-      font-family: monospace;
-      white-space: pre-wrap;
-      font-size: 14px;
-    }
-    .log-entry {
       margin-bottom: 15px;
-      padding-bottom: 15px;
-      border-bottom: 1px dashed #ddd;
+      border-radius: 4px;
     }
-    .log-entry.request {
-      color: #4285f4;
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
     }
-    .log-entry.response {
-      color: #34a853;
+    .method {
+      font-weight: bold;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: white;
     }
-    .log-entry.error {
-      color: #db4437;
+    .method.get { background-color: #61affe; }
+    .method.post { background-color: #49cc90; }
+    .method.put { background-color: #fca130; }
+    .method.delete { background-color: #f93e3e; }
+    .method.options { background-color: #0d5aa7; }
+    .method.head { background-color: #9012fe; }
+    .method.patch { background-color: #50e3c2; }
+    .log-body {
+      background-color: #f8f8f8;
+      padding: 10px;
+      border-radius: 4px;
+      white-space: pre-wrap;
+      overflow-x: auto;
+      max-height: 300px;
+      overflow-y: auto;
     }
     .timestamp {
-      color: #888;
-      font-size: 12px;
+      color: #666;
+      font-size: 0.9em;
     }
-    pre {
+    .log-url {
+      word-break: break-all;
       margin: 5px 0;
-      background-color: #f0f0f0;
-      padding: 8px;
-      border-radius: 4px;
-      overflow-x: auto;
     }
-    .filter {
-      padding: 8px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      margin-left: auto;
-      width: 200px;
-    }
-    .status-bar {
-      display: flex;
-      align-items: center;
+    .log-headers {
       margin-top: 10px;
-      font-size: 14px;
+      cursor: pointer;
+    }
+    .log-headers-content {
+      display: none;
+      background-color: #f8f8f8;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 5px;
+    }
+    .empty-state {
+      text-align: center;
+      padding: 50px;
       color: #666;
     }
-    .connection-status {
-      margin-right: 15px;
+    .loading {
+      text-align: center;
+      padding: 20px;
+      color: #666;
     }
-    .connection-indicator {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background-color: grey;
-      margin-right: 5px;
-    }
-    .connected {
-      background-color: #34a853;
+    /* 响应式设计 */
+    @media (max-width: 768px) {
+      .log-header {
+        flex-direction: column;
+      }
+      .controls {
+        flex-direction: column;
+      }
+      button {
+        margin-bottom: 10px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Gemini API 代理调试器</h1>
-    
-    <div class="controls">
-      <label class="switch">
-        <input type="checkbox" id="debugToggle">
-        <span class="slider"></span>
-      </label>
-      <span class="status">调试模式：<span id="debugStatus">关闭</span></span>
-      
-      <button class="clear" id="clearLogs">清除日志</button>
-      <button class="test" id="testRequest">发送测试请求</button>
-      <input type="text" class="filter" id="logFilter" placeholder="过滤关键词...">
+  <h1>请求调试器</h1>
+  
+  <div class="status-bar">
+    <div class="status-indicator">
+      <div id="statusDot" class="status-dot"></div>
+      <span id="statusText">调试模式已关闭</span>
     </div>
-    
-    <div id="logs"></div>
-    
-    <div class="status-bar">
-      <div class="connection-status">
-        <span class="connection-indicator" id="connectionIndicator"></span>
-        <span id="connectionStatus">未连接</span>
-      </div>
-      <div id="requestCounter">请求数: 0</div>
+    <div class="status-info" id="statusInfo">
+      反代目标: ${TARGET_URL}
     </div>
+  </div>
+  
+  <div class="controls">
+    <div>
+      <button id="toggleBtn">开启调试</button>
+      <button id="refreshBtn">刷新</button>
+      <button id="clearBtn" class="delete">清除所有日志</button>
+    </div>
+  </div>
+  
+  <div id="logList" class="log-list">
+    <div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>
   </div>
 
   <script>
-    const logsContainer = document.getElementById('logs');
-    const debugToggle = document.getElementById('debugToggle');
-    const debugStatus = document.getElementById('debugStatus');
-    const clearLogsBtn = document.getElementById('clearLogs');
-    const testRequestBtn = document.getElementById('testRequest');
-    const logFilter = document.getElementById('logFilter');
-    const connectionStatus = document.getElementById('connectionStatus');
-    const connectionIndicator = document.getElementById('connectionIndicator');
-    const requestCounter = document.getElementById('requestCounter');
-    
-    let logs = [];
-    let requestCount = 0;
-    let ws;
-    
-    // 建立WebSocket连接
-    function connectWebSocket() {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(\`\${protocol}//\${window.location.host}/ws\`);
-      
-      ws.onopen = () => {
-        connectionStatus.textContent = '已连接';
-        connectionIndicator.classList.add('connected');
-        // 连接后请求当前状态
-        ws.send(JSON.stringify({ type: 'getStatus' }));
-        console.log("WebSocket已连接，发送状态请求");
-      };
-      
-      ws.onclose = () => {
-        connectionStatus.textContent = '连接断开，尝试重连...';
-        connectionIndicator.classList.remove('connected');
-        setTimeout(connectWebSocket, 3000);
-      };
-      
-      ws.onerror = (error) => {
-        console.error('WebSocket错误:', error);
-      };
-      
-      ws.onmessage = (event) => {
-        console.log("收到服务器消息", event.data);
-        const data = JSON.parse(event.data);
-        
-        switch(data.type) {
-          case 'log':
-            logs.push(data);
-            if (shouldShowLog(data)) {
-              addLogToDisplay(data);
-            }
-            break;
-          case 'status':
-            console.log("收到状态更新", data);
-            updateDebugStatus(data.debugMode);
-            logs = data.logs || [];
-            renderLogs();
-            requestCount = data.requestCount || 0;
-            requestCounter.textContent = \`请求数: \${requestCount}\`;
-            break;
-          case 'debugUpdate':
-            console.log("收到调试模式更新", data);
-            updateDebugStatus(data.debugMode);
-            break;
-          case 'clearLogs':
-            logs = [];
-            logsContainer.innerHTML = '';
-            break;
-        }
-      };
+    // 格式化时间戳
+    function formatTimestamp(timestamp) {
+      const date = new Date(timestamp);
+      return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      });
     }
     
-    function updateDebugStatus(isEnabled) {
-      console.log("更新调试状态UI", isEnabled);
-      debugToggle.checked = isEnabled;
-      debugStatus.textContent = isEnabled ? '开启' : '关闭';
+    // 格式化时间差
+    function formatDuration(startTime) {
+      const duration = Math.floor((Date.now() - startTime) / 1000);
+      const hours = Math.floor(duration / 3600);
+      const minutes = Math.floor((duration % 3600) / 60);
+      const seconds = duration % 60;
+      
+      let result = '';
+      if (hours > 0) {
+        result += hours + '小时';
+      }
+      if (minutes > 0 || hours > 0) {
+        result += minutes + '分';
+      }
+      result += seconds + '秒';
+      
+      return result;
     }
     
-    function addLogToDisplay(logData) {
-      const logEntry = document.createElement('div');
-      logEntry.className = \`log-entry \${logData.category || ''}\`;
+    // 格式化请求体
+    function formatBody(body) {
+      if (!body) return '无内容';
       
-      const timestamp = document.createElement('div');
-      timestamp.className = 'timestamp';
-      timestamp.textContent = new Date(logData.timestamp).toLocaleTimeString();
-      
-      const content = document.createElement('div');
-      content.innerHTML = logData.content;
-      
-      logEntry.appendChild(timestamp);
-      logEntry.appendChild(content);
-      
-      logsContainer.appendChild(logEntry);
-      logsContainer.scrollTop = logsContainer.scrollHeight;
-      
-      if (logData.category === 'request') {
-        requestCount++;
-        requestCounter.textContent = \`请求数: \${requestCount}\`;
+      try {
+        // 尝试解析为JSON并格式化
+        const parsed = JSON.parse(body);
+        return JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        // 如果不是JSON，直接返回
+        return body;
       }
     }
     
-    function shouldShowLog(logData) {
-      const filterText = logFilter.value.toLowerCase();
-      if (!filterText) return true;
+    // 获取调试状态
+    async function getDebugStatus() {
+      try {
+        const response = await fetch('/api/debug/status');
+        return await response.json();
+      } catch (error) {
+        console.error('获取调试状态失败:', error);
+        return { isDebugMode: false };
+      }
+    }
+    
+    // 切换调试模式
+    async function toggleDebugMode() {
+      const toggleBtn = document.getElementById('toggleBtn');
+      toggleBtn.disabled = true;
       
-      return logData.content.toLowerCase().includes(filterText);
+      try {
+        const response = await fetch('/api/debug/toggle', {
+          method: 'POST'
+        });
+        
+        const result = await response.json();
+        updateDebugStatus(result);
+        loadLogs();
+        
+      } catch (error) {
+        console.error('切换调试模式失败:', error);
+        alert('操作失败，请重试');
+      } finally {
+        toggleBtn.disabled = false;
+      }
     }
     
-    function renderLogs() {
-      logsContainer.innerHTML = '';
-      logs.filter(shouldShowLog).forEach(addLogToDisplay);
+    // 更新调试状态UI
+    function updateDebugStatus(status) {
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
+      const toggleBtn = document.getElementById('toggleBtn');
+      const statusInfo = document.getElementById('statusInfo');
+      
+      if (status.isDebugMode) {
+        statusDot.classList.add('active');
+        statusText.textContent = '调试模式已开启';
+        toggleBtn.textContent = '关闭调试';
+        toggleBtn.classList.add('toggle-off');
+        
+        // 更新持续时间
+        if (status.startTime) {
+          const duration = formatDuration(status.startTime);
+          statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${duration}\`;
+          
+          // 定时更新持续时间
+          if (!window.durationTimer) {
+            window.durationTimer = setInterval(() => {
+              const newDuration = formatDuration(status.startTime);
+              statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${newDuration}\`;
+            }, 1000);
+          }
+        }
+      } else {
+        statusDot.classList.remove('active');
+        statusText.textContent = '调试模式已关闭';
+        toggleBtn.textContent = '开启调试';
+        toggleBtn.classList.remove('toggle-off');
+        statusInfo.innerHTML = \`反代目标: ${TARGET_URL}\`;
+        
+        // 清除定时器
+        if (window.durationTimer) {
+          clearInterval(window.durationTimer);
+          window.durationTimer = null;
+        }
+      }
     }
     
-    // 事件监听
-    debugToggle.addEventListener('change', () => {
-      console.log("调试开关切换为", debugToggle.checked);
-      ws.send(JSON.stringify({
-        type: 'setDebug',
-        enabled: debugToggle.checked
-      }));
-    });
+    // 加载日志
+    async function loadLogs() {
+      const logList = document.getElementById('logList');
+      
+      try {
+        const statusResponse = await fetch('/api/debug/status');
+        const status = await statusResponse.json();
+        
+        if (!status.isDebugMode) {
+          logList.innerHTML = '<div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>';
+          return;
+        }
+        
+        logList.innerHTML = '<div class="loading">加载中...</div>';
+        
+        const response = await fetch('/api/logs');
+        const logs = await response.json();
+        
+        if (logs.length === 0) {
+          logList.innerHTML = '<div class="empty-state">暂无请求日志</div>';
+          return;
+        }
+        
+        let html = '';
+        logs.forEach(log => {
+          const methodClass = log.method.toLowerCase();
+          html += \`
+            <div class="log-item">
+              <div class="log-header">
+                <span class="method \${methodClass}">\${log.method}</span>
+                <span class="timestamp">\${formatTimestamp(log.timestamp)}</span>
+              </div>
+              <div class="log-url">\${log.path}</div>
+              <div class="log-headers" onclick="toggleHeaders('headers-\${log.id}')">
+                请求头 (点击展开)
+                <div id="headers-\${log.id}" class="log-headers-content">
+                  <pre>\${JSON.stringify(log.headers, null, 2)}</pre>
+                </div>
+              </div>
+              <div class="log-body-label">请求体:</div>
+              <pre class="log-body">\${formatBody(log.body)}</pre>
+            </div>
+          \`;
+        });
+        
+        logList.innerHTML = html;
+      } catch (error) {
+        logList.innerHTML = '<div class="empty-state">加载失败，请重试</div>';
+        console.error('加载日志失败:', error);
+      }
+    }
     
-    clearLogsBtn.addEventListener('click', () => {
-      ws.send(JSON.stringify({ type: 'clearLogs' }));
-    });
+    // 切换请求头显示
+    function toggleHeaders(id) {
+      const element = document.getElementById(id);
+      if (element.style.display === 'block') {
+        element.style.display = 'none';
+      } else {
+        element.style.display = 'block';
+      }
+    }
     
-    // 添加测试请求按钮事件
-    testRequestBtn.addEventListener('click', () => {
-      console.log("发送测试请求");
-      ws.send(JSON.stringify({ type: 'testRequest' }));
-    });
+    // 清除所有日志
+    async function clearLogs() {
+      if (!confirm('确定要清除所有日志吗？此操作不可撤销。')) {
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/logs', {
+          method: 'DELETE'
+        });
+        
+        if (response.ok) {
+          alert('日志已清除');
+          loadLogs();
+          
+          // 更新状态信息
+          const statusResponse = await fetch('/api/debug/status');
+          const status = await statusResponse.json();
+          updateDebugStatus(status);
+        } else {
+          alert('清除日志失败');
+        }
+      } catch (error) {
+        alert('清除日志失败');
+        console.error('清除日志失败:', error);
+      }
+    }
     
-    logFilter.addEventListener('input', renderLogs);
+    // 页面加载时初始化
+    async function init() {
+      try {
+        const status = await getDebugStatus();
+        updateDebugStatus(status);
+        loadLogs();
+      } catch (error) {
+        console.error('初始化失败:', error);
+      }
+    }
     
-    // 初始连接
-    console.log("页面加载完成，开始WebSocket连接");
-    connectWebSocket();
+    // 绑定事件处理器
+    document.getElementById('toggleBtn').addEventListener('click', toggleDebugMode);
+    document.getElementById('refreshBtn').addEventListener('click', loadLogs);
+    document.getElementById('clearBtn').addEventListener('click', clearLogs);
+    
+    // 页面加载完成后初始化
+    window.onload = init;
   </script>
 </body>
-</html>`;
-
-// 辅助函数：发送日志到所有WebSocket客户端
-function broadcastLog(category: string, content: string) {
-  const logEntry = {
-    type: 'log',
-    category,
-    content,
-    timestamp: new Date().toISOString()
-  };
-  
-  logEntries.push(logEntry);
-  
-  // 广播到所有连接的客户端
-  const message = JSON.stringify(logEntry);
-  console.log(`正在广播消息到 ${webSocketClients.size} 个客户端`);
-  for (const client of webSocketClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  }
+</html>
+  `;
 }
 
-// 辅助函数：发送状态更新到所有客户端
-function broadcastStatus() {
-  const statusMessage = JSON.stringify({
-    type: 'status',
-    debugMode: isDebugMode,
-    logs: logEntries,
-    requestCount: logEntries.filter(entry => entry.category === 'request').length
-  });
-  
-  console.log(`广播状态更新: 调试模式=${isDebugMode}`);
-  
-  for (const client of webSocketClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(statusMessage);
-    }
-  }
-}
-
-// 辅助函数：记录请求或响应数据
-async function logData(label: string, data: Request | Response) {
-  if (!isDebugMode) return;
-  
-  // 新增流状态检测
-  console.log(`[诊断] ${label} body可读状态:`, {
-    bodyUsed: data.bodyUsed,
-    locked: data.body?.locked ?? false
-  });
-  
-  let logContent = `<strong>${label}</strong><br>`;
-  logContent += `${data instanceof Request ? data.method : 'RESPONSE'} ${data instanceof Request ? data.url : '(无URL)'}<br>`;
-  
-  // 添加头部信息
-  logContent += `<strong>Headers:</strong><pre>${JSON.stringify(Object.fromEntries([...data.headers]), null, 2)}</pre>`;
-  
-  // 添加正文信息
-  if (data.body) {
-    try {
-      const clone = data.clone();
-      const text = await clone.text();
-      try {
-        // 尝试解析为JSON以美化输出
-        const json = JSON.parse(text);
-        logContent += `<strong>Body:</strong><pre>${JSON.stringify(json, null, 2)}</pre>`;
-      } catch {
-        // 如果不是JSON，直接输出文本
-        logContent += `<strong>Body:</strong><pre>${text}</pre>`;
-      }
-    } catch (e) {
-      logContent += `<strong>Body:</strong> 无法读取 (可能已被消耗)`;
-    }
-  } else {
-    logContent += `<strong>Body:</strong> 空`;
+// 处理调试API
+async function handleDebugApi(request: Request, path: string): Promise<Response> {
+  // 获取调试状态
+  if (path === "/api/debug/status" && request.method === "GET") {
+    return new Response(JSON.stringify({
+      isDebugMode: state.isDebugMode,
+      startTime: state.startTime,
+      logCount: state.logs.length
+    }), {
+      headers: { "Content-Type": "application/json" }
+    });
   }
   
-  // 发送日志到客户端
-  broadcastLog(data instanceof Request ? 'request' : 'response', logContent);
-  
-  // 同时在服务器控制台输出
-  console.log(`---------- ${label} ----------`);
-  console.log(`${data instanceof Request ? data.method : 'RESPONSE'} ${data instanceof Request ? data.url : '(无URL)'}`);
-  console.log("Headers:", JSON.stringify(Object.fromEntries([...data.headers]), null, 2));
-  // 剩余的控制台日志逻辑保持不变...
-}
-
-// 记录特殊请求，无视调试模式状态
-async function logSpecialRequest(label: string, data: Request | Response) {
-  console.log("强制记录开始", label);
-  const start = Date.now();
-  
-  // 强制读取body内容
-  const bodyCopy = await data.clone().text().catch(e => `[读取错误] ${e.message}`);
-  console.log(`请求体长度: ${bodyCopy.length} 字符`);
-  
-  // 原始记录逻辑
-  const originalDebugMode = isDebugMode;
-  isDebugMode = true;
-  try {
-    await logData(`[强制记录] ${label}`, data);
-  } finally {
-    isDebugMode = originalDebugMode;
-    console.log(`记录完成，耗时 ${Date.now() - start}ms`);
-  }
-}
-
-async function handleWebSocket(request: Request): Promise<Response> {
-  const { socket, response } = Deno.upgradeWebSocket(request);
-  
-  console.log("WebSocket连接已建立");
-  
-  socket.onopen = () => {
-    console.log("WebSocket已打开，添加到客户端列表");
-    webSocketClients.add(socket);
+  // 切换调试模式
+  if (path === "/api/debug/toggle" && request.method === "POST") {
+    state.isDebugMode = !state.isDebugMode;
     
-    // 发送当前状态到新连接的客户端
-    socket.send(JSON.stringify({
-      type: 'status',
-      debugMode: isDebugMode,
-      logs: logEntries,
-      requestCount: logEntries.filter(entry => entry.category === 'request').length
-    }));
-  };
-  
-  socket.onclose = () => {
-    console.log("WebSocket已关闭，从客户端列表移除");
-    webSocketClients.delete(socket);
-  };
-  
-  socket.onmessage = (event) => {
-    try {
-      console.log("收到WebSocket消息:", event.data);
-      const message = JSON.parse(event.data);
-      
-      switch (message.type) {
-        case 'setDebug':
-          console.log(`调试模式状态变更: ${isDebugMode} -> ${message.enabled}`);
-          isDebugMode = message.enabled;
-          
-          // 添加一条状态变更日志
-          broadcastLog('system', `<strong>调试模式已${isDebugMode ? '开启' : '关闭'}</strong>`);
-          
-          // 通知所有客户端调试状态变更
-          broadcastStatus();
-          break;
-        case 'clearLogs':
-          console.log("清除所有日志");
-          logEntries.length = 0;
-          // 通知所有客户端清空日志
-          for (const client of webSocketClients) {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({ type: 'clearLogs' }));
-            }
-          }
-          break;
-        case 'getStatus':
-          console.log("发送当前状态");
-          socket.send(JSON.stringify({
-            type: 'status',
-            debugMode: isDebugMode,
-            logs: logEntries,
-            requestCount: logEntries.filter(entry => entry.category === 'request').length
-          }));
-          break;
-        case 'testRequest':
-          // 添加测试请求功能
-          console.log("收到测试请求命令");
-          broadcastLog('info', '<strong>手动测试请求</strong><br>这是一个模拟的API请求');
-          break;
-        default:
-          console.log(`未知消息类型: ${message.type}`);
-      }
-    } catch (e) {
-      console.error("Error processing WebSocket message:", e);
+    if (state.isDebugMode) {
+      state.startTime = Date.now();
+    } else {
+      state.startTime = 0;
     }
-  };
+    
+    return new Response(JSON.stringify({
+      isDebugMode: state.isDebugMode,
+      startTime: state.startTime,
+      logCount: state.logs.length
+    }), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
   
-  return response;
+  return new Response(JSON.stringify({ error: "未找到API路由" }), {
+    status: 404,
+    headers: { "Content-Type": "application/json" }
+  });
 }
 
-async function handleRequest(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  
-  console.log(`收到请求: ${request.method} ${url.pathname}`);
-  
-  // 立即克隆并缓冲请求体
-  const requestClone = request.clone(); 
-  let requestBodyText = ""; 
-  try { 
-    requestBodyText = await requestClone.text(); 
-    console.log("成功读取请求体，长度:", requestBodyText.length); 
-  } catch (e) { 
-    console.error("读取请求体失败:", e); 
+// 处理日志API
+async function handleLogsApi(request: Request): Promise<Response> {
+  // 获取所有日志
+  if (request.method === "GET") {
+    return new Response(JSON.stringify(state.logs), {
+      headers: { "Content-Type": "application/json" }
+    });
   } 
-  
-  // 规范化路径处理
-  const normalizedPath = url.pathname.replace(/\/{2,}/g, '/');
-  
-  // 检查请求头和特征 - 仅用于日志记录，不用于过滤
-  const userAgent = request.headers.get('user-agent') || '';
-  const contentType = request.headers.get('content-type') || '';
-  const origin = request.headers.get('origin') || '';
-  
-  // 记录请求信息但不进行过滤
-  console.log(`请求分析: 路径=${normalizedPath}, UA=${userAgent.substring(0, 30)}`);
-  console.log(`请求头:`, JSON.stringify(Object.fromEntries([...request.headers])));
-  
-  // 处理Web界面请求
-  if (url.pathname === "/debug") {
-    console.log("提供调试界面");
-    return new Response(HTML_CONTENT, {
-      headers: { "Content-Type": "text/html" }
+  // 清除所有日志
+  else if (request.method === "DELETE") {
+    const success = clearAllRequestLogs();
+    return new Response(JSON.stringify({ success }), {
+      status: success ? 200 : 500,
+      headers: { "Content-Type": "application/json" }
     });
   }
   
-  // 处理WebSocket连接
-  if (url.pathname === "/ws") {
-    console.log("处理WebSocket连接请求");
-    try {
-      return handleWebSocket(request);
-    } catch (e) {
-      console.error("WebSocket连接错误:", e);
-      return new Response("WebSocket Error: " + e.message, { status: 500 });
-    }
-  }
-  
-  // 使用缓冲后的请求体创建可记录的请求对象
-  const loggableRequest = new Request(request.url, { 
-    method: request.method, 
-    headers: request.headers, 
-    body: requestBodyText || null 
-  }); 
-  
-  // 记录可记录的请求对象
-  await logSpecialRequest("收到的客户端请求", loggableRequest);
-
-  // 处理API反向代理 - 直接转发所有请求
-  console.log(`代理请求到: ${target}${normalizedPath}`);
-  const targetUrl = new URL(target + normalizedPath + url.search);
-
-  // 修复4：使用原始body进行转发
-  const newRequest = new Request(targetUrl.toString(), {
-    method: request.method,
-    headers: request.headers,
-    body: requestBodyText || null, 
-    redirect: "manual"
+  return new Response(JSON.stringify({ error: "不支持的方法" }), {
+    status: 405,
+    headers: { "Content-Type": "application/json" }
   });
-    
-  // 设置CORS头
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "*", // 允许所有头部
-  };
+}
 
-  if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders,
-    });
-  }
-
+// 处理代理转发
+async function handleProxy(request: Request): Promise<Response> {
   try {
-    // 记录发送到Google的请求
-    await logSpecialRequest("发送到Google的请求", newRequest);
+    const url = new URL(request.url);
+    const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    const response = await fetch(newRequest);
+    // 创建新请求
+    const proxyRequest = new Request(targetUrl.toString(), {
+      method: request.method,
+      headers: new Headers(request.headers),
+      body: request.body,
+      redirect: 'follow'
+    });
     
-    // 记录来自Google的响应
-    await logSpecialRequest("来自Google的响应", response);
-
-    // 创建新的响应头
-    const newHeaders = new Headers(response.headers);
+    // 删除一些不需要的头部
+    proxyRequest.headers.delete('host');
     
-    // 添加CORS头
-    for (const key of Object.keys(corsHeaders)) {
-      newHeaders.set(key, corsHeaders[key]);
-    }
-
-    // 返回响应
-    return new Response(response.body, {
+    // 执行请求
+    const response = await fetch(proxyRequest);
+    
+    // 构建响应
+    const proxyResponse = new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: newHeaders,
+      headers: new Headers(response.headers)
     });
-
+    
+    // 添加CORS头
+    proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
+    
+    return proxyResponse;
   } catch (error) {
-    console.error("请求处理错误:", error);
-    broadcastLog('error', `<strong>错误：</strong><pre>${error.message || '未知错误'}</pre>`);
-    return new Response("Internal Server Error", { status: 500 });
+    console.error('代理请求失败:', error);
+    return new Response(JSON.stringify({ error: '代理请求失败', message: error.message }), {
+      status: 500,
+      headers: { 
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
   }
 }
 
-// 启动服务器
-console.log(`调试面板可在 http://localhost:8080/debug 访问`);
-console.log(`调试模式: ${isDebugMode ? '已启用' : '已禁用'}`);
-
-// 添加初始测试日志和模拟请求
-setTimeout(() => {
-  console.log("添加初始测试日志");
-  broadcastLog('info', '<strong>系统测试</strong><br>如果您能看到此消息，WebSocket连接正常工作');
+// 请求处理函数
+async function handleRequest(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
   
-  // 再添加一条模拟的API请求日志
-  setTimeout(() => {
-    if (webSocketClients.size > 0) {
-      console.log("添加模拟请求日志");
-      broadcastLog('request', `<strong>模拟请求示例</strong><br>
-      <strong>Headers:</strong><pre>{"Content-Type": "application/json"}</pre>
-      <strong>Body:</strong><pre>{
-  "contents": [
-    {
-      "parts": [
-        {
-          "text": "你好，请介绍一下自己"
-        }
-      ]
+  // 处理OPTIONS预检请求
+  if (request.method === "OPTIONS") {
+    return handleOptionsRequest();
+  }
+  
+  // 处理API请求
+  if (path.startsWith("/api/")) {
+    // 调试API
+    if (path.startsWith("/api/debug/")) {
+      return handleDebugApi(request, path);
     }
-  ]
-}</pre>`);
+    
+    // 日志API
+    if (path === "/api/logs") {
+      return handleLogsApi(request);
     }
-  }, 2000);
-}, 5000);
+    
+    // 未找到API路由
+    return new Response(JSON.stringify({ error: "未找到API路由" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  
+  // 主页 - 提供可视化界面
+  if (path === "/" || path === "") {
+    return new Response(getHtmlIndex(), {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
+  }
+  
+  // 记录请求（如果调试模式已开启）
+  if (state.isDebugMode) {
+    // 克隆请求体以避免 ReadableStream 被锁定
+    const requestClone = request.clone();
+    let requestBody = "";
+    
+    // 对于GET和HEAD请求，不读取请求体
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      try {
+        requestBody = await requestClone.text();
+        logFullContent("请求体", requestBody);
+      } catch (error) {
+        console.error("读取请求体失败:", error);
+      }
+    }
+    
+    // 保存请求日志
+    saveRequestLog(request, requestBody);
+  }
+  
+  // 转发请求到目标服务器
+  return handleProxy(request);
+}
 
-serve(handleRequest, { port: 8080 }); 
+// 服务器启动
+console.log(`启动反代服务器，目标: ${TARGET_URL}`);
+Deno.serve({
+  onListen: ({ port }) => {
+    console.log(`服务启动成功，监听端口: ${port}`);
+    console.log(`请访问 http://localhost:${port}/ 打开调试界面`);
+  },
+}, async (request: Request) => {
+  try {
+    return await handleRequest(request);
+  } catch (error) {
+    console.error(`请求处理出错:`, error);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+});
