@@ -673,88 +673,40 @@ async function handleRequest(request: Request): Promise<Response> {
   }
   
   // ===== 代理请求处理 =====
-  // 复制请求信息用于日志记录
-  const headers = Object.fromEntries(request.headers.entries());
-  const clientIP = request.headers.get("x-forwarded-for") || "unknown";
-  
-  // 克隆请求用于后续日志记录
-  let requestClone;
-  try {
-    requestClone = request.clone();
-  } catch (e) {
-    console.error("克隆请求失败:", e);
-  }
-  
-  // 先直接转发请求，不尝试读取请求体
-  const proxyResponse = await handleProxy(request);
-  
-  // 如果处于调试模式，异步记录请求（不影响响应返回）
-  if (state.isDebugMode && requestClone && method !== "GET" && method !== "HEAD") {
-    // 创建一个延迟执行的任务，异步读取请求体
-    (async () => {
-      try {
-        // 尝试读取请求体
-        const bodyText = await requestClone.text().catch(() => "");
-        
-        // 创建日志条目
-        const timestamp = Date.now();
-        const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
-        
-        // 记录请求信息
-        const logEntry: RequestLog = {
-          id: requestId,
-          timestamp,
-          method,
-          url: request.url,
-          path,
-          headers,
-          body: bodyText || "[无法读取请求体或请求体为空]",
-          clientIP
-        };
-        
-        state.logs.unshift(logEntry);
-        
-        // 保持日志数不超过最大值
-        if (state.logs.length > MAX_LOGS) {
-          state.logs = state.logs.slice(0, MAX_LOGS);
-        }
-        
-        console.log(`异步保存请求日志: ${requestId}, 路径: ${path}`);
-        if (bodyText) {
-          logFullContent("请求体(异步获取)", bodyText);
-        }
-      } catch (error) {
-        console.error("异步记录请求失败:", error);
+  if (state.isDebugMode && method !== "GET" && method !== "HEAD") {
+    try {
+      // 在转发前读取请求体
+      const requestClone = request.clone();
+      const requestBody = await requestClone.text();
+      
+      // 记录请求信息
+      const timestamp = Date.now();
+      const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
+      
+      const logEntry: RequestLog = {
+        id: requestId,
+        timestamp,
+        method,
+        url: request.url,
+        path,
+        headers: Object.fromEntries(request.headers.entries()),
+        body: requestBody || "[请求体为空]",
+        clientIP: request.headers.get("x-forwarded-for") || "unknown"
+      };
+      
+      state.logs.unshift(logEntry);
+      if (state.logs.length > MAX_LOGS) {
+        state.logs = state.logs.slice(0, MAX_LOGS);
       }
-    })();
-  } else if (state.isDebugMode) {
-    // GET/HEAD请求直接记录，无需请求体
-    const timestamp = Date.now();
-    const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
-    
-    const logEntry: RequestLog = {
-      id: requestId,
-      timestamp,
-      method,
-      url: request.url,
-      path,
-      headers,
-      body: "",
-      clientIP
-    };
-    
-    state.logs.unshift(logEntry);
-    
-    // 保持日志数不超过最大值
-    if (state.logs.length > MAX_LOGS) {
-      state.logs = state.logs.slice(0, MAX_LOGS);
+      
+      logFullContent("请求体", requestBody);
+    } catch (error) {
+      console.error("读取请求体失败:", error);
     }
-    
-    console.log(`保存GET/HEAD请求日志: ${requestId}, 路径: ${path}`);
   }
   
-  // 立即返回代理响应
-  return proxyResponse;
+  // 转发请求
+  return handleProxy(request);
 }
 
 // 服务器启动
