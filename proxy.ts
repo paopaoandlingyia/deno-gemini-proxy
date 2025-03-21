@@ -383,6 +383,12 @@ function broadcastStatus() {
 async function logData(label: string, data: Request | Response) {
   if (!isDebugMode) return;
   
+  // 新增流状态检测
+  console.log(`[诊断] ${label} body可读状态:`, {
+    bodyUsed: data.bodyUsed,
+    locked: data.body?.locked ?? false
+  });
+  
   let logContent = `<strong>${label}</strong><br>`;
   logContent += `${data instanceof Request ? data.method : 'RESPONSE'} ${data instanceof Request ? data.url : '(无URL)'}<br>`;
   
