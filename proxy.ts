@@ -518,12 +518,34 @@ async function handleRequest(request: Request): Promise<Response> {
   const userAgent = request.headers.get('user-agent') || '';
   const contentType = request.headers.get('content-type') || '';
   const origin = request.headers.get('origin') || '';
+  const authorization = request.headers.get('authorization') || '';
+  const apiKey = request.headers.get('x-goog-api-key') || url.searchParams.get('key') || '';
+  
+  // 添加更多认证方式检查
+  let authKeyToUse = '';
+  if (apiKey) {
+    authKeyToUse = apiKey;
+  } else if (authorization && authorization.startsWith('Bearer ')) {
+    authKeyToUse = authorization.substring(7);
+  }
+  
+  // 规范化路径处理
+  const normalizedPath = url.pathname.replace(/\/{2,}/g, '/');
   
   // 强制记录特定的请求以便调试
-  // 记录所有请求
-  const shouldForceLog = true;  // 始终强制记录所有请求
+  const shouldForceLog = 
+    // 如果路径包含特定的API调用
+    normalizedPath.includes('/v1beta/models/gemini') || 
+    // Node.js相关的请求
+    userAgent.includes('node-fetch') ||
+    userAgent.includes('axios') ||
+    userAgent.includes('undici') ||
+    // 特定的API调用
+    normalizedPath.includes('generateContent') ||
+    normalizedPath.includes('chat/completions');
   
-  console.log(`请求分析: 路径=${url.pathname}, UA=${userAgent.substring(0, 30)}, 内容类型=${contentType}, 源=${origin}`);
+  console.log(`请求分析: 路径=${normalizedPath}, UA=${userAgent.substring(0, 30)}, 内容类型=${contentType}, 源=${origin}`);
+  console.log(`认证信息: API密钥=${apiKey ? '已提供' : '未提供'}, Bearer令牌=${authorization ? '已提供' : '未提供'}`);
   
   // 记录特殊请求头以便调试
   console.log("请求头:", JSON.stringify(Object.fromEntries([...request.headers])));
@@ -548,8 +570,8 @@ async function handleRequest(request: Request): Promise<Response> {
   }
   
   // 处理API反向代理
-  console.log(`代理请求到: ${target}${url.pathname}`);
-  const targetUrl = new URL(target + url.pathname + url.search);
+  console.log(`代理请求到: ${target}${normalizedPath}`);
+  const targetUrl = new URL(target + normalizedPath + url.search);
 
   // 记录收到的请求
   if (isDebugMode || shouldForceLog) {
@@ -564,10 +586,17 @@ async function handleRequest(request: Request): Promise<Response> {
     console.log("调试模式未启用，跳过日志记录");
   }
 
-  // 构建新的请求
+  // 构建新的请求 - 确保添加所有可能的认证头
+  const newHeaders = new Headers(request.headers);
+  
+  // 设置API密钥到请求头 - 确保包含所有可能的认证方式
+  if (authKeyToUse) {
+    newHeaders.set('x-goog-api-key', authKeyToUse);
+  }
+  
   const newRequest = new Request(targetUrl.toString(), {
     method: request.method,
-    headers: request.headers,
+    headers: newHeaders,
     body: request.body,
     redirect: "manual", // 避免自动重定向
   });
