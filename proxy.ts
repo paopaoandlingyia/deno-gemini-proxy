@@ -514,41 +514,17 @@ async function handleRequest(request: Request): Promise<Response> {
   
   console.log(`收到请求: ${request.method} ${url.pathname}`);
   
-  // 检查请求头和特征
-  const userAgent = request.headers.get('user-agent') || '';
-  const contentType = request.headers.get('content-type') || '';
-  const origin = request.headers.get('origin') || '';
-  const authorization = request.headers.get('authorization') || '';
-  const apiKey = request.headers.get('x-goog-api-key') || url.searchParams.get('key') || '';
-  
-  // 添加更多认证方式检查
-  let authKeyToUse = '';
-  if (apiKey) {
-    authKeyToUse = apiKey;
-  } else if (authorization && authorization.startsWith('Bearer ')) {
-    authKeyToUse = authorization.substring(7);
-  }
-  
   // 规范化路径处理
   const normalizedPath = url.pathname.replace(/\/{2,}/g, '/');
   
-  // 强制记录特定的请求以便调试
-  const shouldForceLog = 
-    // 如果路径包含特定的API调用
-    normalizedPath.includes('/v1beta/models/gemini') || 
-    // Node.js相关的请求
-    userAgent.includes('node-fetch') ||
-    userAgent.includes('axios') ||
-    userAgent.includes('undici') ||
-    // 特定的API调用
-    normalizedPath.includes('generateContent') ||
-    normalizedPath.includes('chat/completions');
+  // 检查请求头和特征 - 仅用于日志记录，不用于过滤
+  const userAgent = request.headers.get('user-agent') || '';
+  const contentType = request.headers.get('content-type') || '';
+  const origin = request.headers.get('origin') || '';
   
-  console.log(`请求分析: 路径=${normalizedPath}, UA=${userAgent.substring(0, 30)}, 内容类型=${contentType}, 源=${origin}`);
-  console.log(`认证信息: API密钥=${apiKey ? '已提供' : '未提供'}, Bearer令牌=${authorization ? '已提供' : '未提供'}`);
-  
-  // 记录特殊请求头以便调试
-  console.log("请求头:", JSON.stringify(Object.fromEntries([...request.headers])));
+  // 记录请求信息但不进行过滤
+  console.log(`请求分析: 路径=${normalizedPath}, UA=${userAgent.substring(0, 30)}`);
+  console.log(`请求头:`, JSON.stringify(Object.fromEntries([...request.headers])));
   
   // 处理Web界面请求
   if (url.pathname === "/debug") {
@@ -569,43 +545,26 @@ async function handleRequest(request: Request): Promise<Response> {
     }
   }
   
-  // 处理API反向代理
+  // 处理API反向代理 - 直接转发所有请求
   console.log(`代理请求到: ${target}${normalizedPath}`);
   const targetUrl = new URL(target + normalizedPath + url.search);
 
-  // 记录收到的请求
-  if (isDebugMode || shouldForceLog) {
-    if (shouldForceLog) {
-      console.log("发现需要强制记录的请求");
-      await logSpecialRequest("收到的客户端特殊请求", request);
-    } else {
-      console.log("调试模式已启用，记录请求");
-      await logData("收到的客户端请求", request);
-    }
-  } else {
-    console.log("调试模式未启用，跳过日志记录");
-  }
+  // 始终记录所有请求
+  await logSpecialRequest("收到的客户端请求", request);
 
-  // 构建新的请求 - 确保添加所有可能的认证头
-  const newHeaders = new Headers(request.headers);
-  
-  // 设置API密钥到请求头 - 确保包含所有可能的认证方式
-  if (authKeyToUse) {
-    newHeaders.set('x-goog-api-key', authKeyToUse);
-  }
-  
+  // 简单地转发请求，保留所有头部
   const newRequest = new Request(targetUrl.toString(), {
     method: request.method,
-    headers: newHeaders,
+    headers: request.headers,
     body: request.body,
     redirect: "manual", // 避免自动重定向
   });
     
-  // 设置访问权限
+  // 设置CORS头
   const corsHeaders = {
-    "Access-Control-Allow-Origin": "*", // 允许所有来源, 生产环境应限制
-    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", // 允许的方法
-    "Access-Control-Allow-Headers": "Content-Type, Authorization", // 允许的头部
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "*", // 允许所有头部
   };
 
   if (request.method === "OPTIONS") {
@@ -615,53 +574,33 @@ async function handleRequest(request: Request): Promise<Response> {
     });
   }
 
-  // 发送请求到目标服务器
   try {
     // 记录发送到Google的请求
-    if (isDebugMode || shouldForceLog) {
-      if (shouldForceLog) {
-        await logSpecialRequest("发送到Google的特殊请求", newRequest);
-      } else {
-        await logData("发送到Google的请求", newRequest);
-      }
-    }
+    await logSpecialRequest("发送到Google的请求", newRequest);
     
     const response = await fetch(newRequest);
     
     // 记录来自Google的响应
-    if (isDebugMode || shouldForceLog) {
-      if (shouldForceLog) {
-        await logSpecialRequest("来自Google的特殊响应", response);
-      } else {
-        await logData("来自Google的响应", response);
-      }
-    }
+    await logSpecialRequest("来自Google的响应", response);
 
-    // 创建新的响应头，先复制原始响应头
+    // 创建新的响应头
     const newHeaders = new Headers(response.headers);
     
-    // 确保删除任何可能已存在的CORS头，避免重复
+    // 添加CORS头
     for (const key of Object.keys(corsHeaders)) {
-      if (newHeaders.has(key)) {
-        newHeaders.delete(key);
-      }
       newHeaders.set(key, corsHeaders[key]);
     }
 
-    // 复制响应，使用新的不重复的头部
-    const newResponse = new Response(response.body, {
+    // 返回响应
+    return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
       headers: newHeaders,
     });
 
-    return newResponse;
-
   } catch (error) {
-    console.error("Error during fetch:", error);
-    if (isDebugMode || shouldForceLog) {
-      broadcastLog('error', `<strong>错误：</strong><pre>${error.message || '未知错误'}</pre>`);
-    }
+    console.error("请求处理错误:", error);
+    broadcastLog('error', `<strong>错误：</strong><pre>${error.message || '未知错误'}</pre>`);
     return new Response("Internal Server Error", { status: 500 });
   }
 }
