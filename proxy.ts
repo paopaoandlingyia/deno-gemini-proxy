@@ -1,28 +1,17 @@
 /// <reference lib="deno.unstable" />
 import { serve } from "https://deno.land/std@0.220.1/http/server.ts";
+import { Redis } from "https://esm.sh/@upstash/redis@1.28.4";
 
-// 配置
-const TARGET_URL = Deno.env.get("TARGET_URL") || "https://generativelanguage.googleapis.com"; // 默认反代目标
-const MAX_LOGS = 100; // 最大保存日志数量
+// Redis配置
+const redis = new Redis({
+  url: Deno.env.get("UPSTASH_REDIS_URL") || "", 
+  token: Deno.env.get("UPSTASH_REDIS_TOKEN") || "", 
+});
 
-// 请求日志存储
-interface RequestLog {
-  id: string;
-  timestamp: number;
-  method: string;
-  url: string;
-  path: string;
-  headers: Record<string, string>;
-  body: string;
-  clientIP: string;
-}
-
-// 全局状态
-const state = {
-  isDebugMode: false, // 默认关闭调试模式
-  logs: [] as RequestLog[], // 日志存储
-  startTime: 0, // 调试模式开始时间
-};
+// 请求日志的Redis键前缀
+const REQUEST_LOG_PREFIX = "request_log:";
+// 最大保存的请求数量
+const MAX_LOGS = 100;
 
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
@@ -41,41 +30,89 @@ function logFullContent(prefix: string, content: string) {
   console.log(`${prefix} 结束 <<<<<<<< (总长度: ${content.length})`);
 }
 
-// 保存请求日志到内存
-function saveRequestLog(request: Request, requestBody: string) {
-  if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
+// 保存请求日志到Redis
+async function saveRequestLog(request: Request, requestBody: string) {
+  try {
+    const timestamp = Date.now();
+    const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
+    const url = new URL(request.url);
+    
+    const logEntry = {
+      id: requestId,
+      timestamp,
+      method: request.method,
+      url: request.url,
+      path: url.pathname,
+      headers: Object.fromEntries(request.headers.entries()),
+      body: requestBody,
+      clientIP: request.headers.get("x-forwarded-for") || "unknown"
+    };
+    
+    // 保存请求日志
+    await redis.set(`${REQUEST_LOG_PREFIX}${requestId}`, JSON.stringify(logEntry));
+    
+    // 将请求ID添加到列表头部
+    await redis.lpush("request_log_ids", requestId);
+    
+    // 保持列表长度不超过最大值
+    await redis.ltrim("request_log_ids", 0, MAX_LOGS - 1);
+    
+    console.log(`保存请求日志: ${requestId}`);
+    return requestId;
+  } catch (error) {
+    console.error("保存请求日志失败:", error);
+    return null;
+  }
+}
+
+// 获取所有请求日志ID
+async function getRequestLogIds(): Promise<string[]> {
+  try {
+    return await redis.lrange("request_log_ids", 0, -1) || [];
+  } catch (error) {
+    console.error("获取请求日志ID失败:", error);
+    return [];
+  }
+}
+
+// 获取单个请求日志
+async function getRequestLog(id: string): Promise<any> {
+  try {
+    const logData = await redis.get(`${REQUEST_LOG_PREFIX}${id}`);
+    return logData ? JSON.parse(logData) : null;
+  } catch (error) {
+    console.error(`获取请求日志 ${id} 失败:`, error);
+    return null;
+  }
+}
+
+// 获取所有请求日志
+async function getAllRequestLogs(): Promise<any[]> {
+  const ids = await getRequestLogIds();
+  const logs = [];
   
-  const timestamp = Date.now();
-  const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
-  const url = new URL(request.url);
-  
-  const logEntry: RequestLog = {
-    id: requestId,
-    timestamp,
-    method: request.method,
-    url: request.url,
-    path: url.pathname,
-    headers: Object.fromEntries(request.headers.entries()),
-    body: requestBody,
-    clientIP: request.headers.get("x-forwarded-for") || "unknown"
-  };
-  
-  // 添加到日志数组前面
-  state.logs.unshift(logEntry);
-  
-  // 保持日志数不超过最大值
-  if (state.logs.length > MAX_LOGS) {
-    state.logs = state.logs.slice(0, MAX_LOGS);
+  for (const id of ids) {
+    const log = await getRequestLog(id);
+    if (log) {
+      logs.push(log);
+    }
   }
   
-  console.log(`保存请求日志: ${requestId}`);
-  return requestId;
+  return logs;
 }
 
 // 清除所有请求日志
-function clearAllRequestLogs(): boolean {
+async function clearAllRequestLogs(): Promise<boolean> {
   try {
-    state.logs = [];
+    const ids = await getRequestLogIds();
+    
+    // 删除所有日志条目
+    for (const id of ids) {
+      await redis.del(`${REQUEST_LOG_PREFIX}${id}`);
+    }
+    
+    // 清空ID列表
+    await redis.del("request_log_ids");
     console.log("已清除所有请求日志");
     return true;
   } catch (error) {
@@ -90,8 +127,8 @@ function handleOptionsRequest(): Response {
     status: 204,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS, PUT, PATCH",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, x-goog-api-key",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Max-Age": "86400",
     }
   });
@@ -105,7 +142,7 @@ function getHtmlIndex(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>请求调试器</title>
+  <title>请求记录器</title>
   <style>
     body {
       font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -117,34 +154,7 @@ function getHtmlIndex(): string {
     }
     h1 {
       text-align: center;
-      margin-bottom: 20px;
-    }
-    .status-bar {
-      background-color: #f8f8f8;
-      border-radius: 4px;
-      padding: 15px;
-      margin-bottom: 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .status-indicator {
-      display: flex;
-      align-items: center;
-    }
-    .status-dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background-color: #999;
-      margin-right: 8px;
-    }
-    .status-dot.active {
-      background-color: #4CAF50;
-    }
-    .status-info {
-      font-size: 0.9em;
-      color: #666;
+      margin-bottom: 30px;
     }
     .controls {
       display: flex;
@@ -163,26 +173,9 @@ function getHtmlIndex(): string {
       margin: 4px 2px;
       cursor: pointer;
       border-radius: 4px;
-      transition: background-color 0.3s;
-    }
-    button:hover {
-      background-color: #45a049;
-    }
-    button:disabled {
-      background-color: #cccccc;
-      cursor: not-allowed;
     }
     button.delete {
       background-color: #f44336;
-    }
-    button.delete:hover {
-      background-color: #d32f2f;
-    }
-    button.toggle-off {
-      background-color: #2196F3;
-    }
-    button.toggle-off:hover {
-      background-color: #0b7dda;
     }
     .log-list {
       margin-bottom: 20px;
@@ -266,28 +259,17 @@ function getHtmlIndex(): string {
   </style>
 </head>
 <body>
-  <h1>请求调试器</h1>
-  
-  <div class="status-bar">
-    <div class="status-indicator">
-      <div id="statusDot" class="status-dot"></div>
-      <span id="statusText">调试模式已关闭</span>
-    </div>
-    <div class="status-info" id="statusInfo">
-      反代目标: ${TARGET_URL}
-    </div>
-  </div>
+  <h1>请求记录器</h1>
   
   <div class="controls">
     <div>
-      <button id="toggleBtn">开启调试</button>
       <button id="refreshBtn">刷新</button>
       <button id="clearBtn" class="delete">清除所有日志</button>
     </div>
   </div>
   
   <div id="logList" class="log-list">
-    <div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>
+    <div class="loading">加载中...</div>
   </div>
 
   <script>
@@ -305,25 +287,6 @@ function getHtmlIndex(): string {
       });
     }
     
-    // 格式化时间差
-    function formatDuration(startTime) {
-      const duration = Math.floor((Date.now() - startTime) / 1000);
-      const hours = Math.floor(duration / 3600);
-      const minutes = Math.floor((duration % 3600) / 60);
-      const seconds = duration % 60;
-      
-      let result = '';
-      if (hours > 0) {
-        result += hours + '小时';
-      }
-      if (minutes > 0 || hours > 0) {
-        result += minutes + '分';
-      }
-      result += seconds + '秒';
-      
-      return result;
-    }
-    
     // 格式化请求体
     function formatBody(body) {
       if (!body) return '无内容';
@@ -338,95 +301,12 @@ function getHtmlIndex(): string {
       }
     }
     
-    // 获取调试状态
-    async function getDebugStatus() {
-      try {
-        const response = await fetch('/api/debug/status');
-        return await response.json();
-      } catch (error) {
-        console.error('获取调试状态失败:', error);
-        return { isDebugMode: false };
-      }
-    }
-    
-    // 切换调试模式
-    async function toggleDebugMode() {
-      const toggleBtn = document.getElementById('toggleBtn');
-      toggleBtn.disabled = true;
-      
-      try {
-        const response = await fetch('/api/debug/toggle', {
-          method: 'POST'
-        });
-        
-        const result = await response.json();
-        updateDebugStatus(result);
-        loadLogs();
-        
-      } catch (error) {
-        console.error('切换调试模式失败:', error);
-        alert('操作失败，请重试');
-      } finally {
-        toggleBtn.disabled = false;
-      }
-    }
-    
-    // 更新调试状态UI
-    function updateDebugStatus(status) {
-      const statusDot = document.getElementById('statusDot');
-      const statusText = document.getElementById('statusText');
-      const toggleBtn = document.getElementById('toggleBtn');
-      const statusInfo = document.getElementById('statusInfo');
-      
-      if (status.isDebugMode) {
-        statusDot.classList.add('active');
-        statusText.textContent = '调试模式已开启';
-        toggleBtn.textContent = '关闭调试';
-        toggleBtn.classList.add('toggle-off');
-        
-        // 更新持续时间
-        if (status.startTime) {
-          const duration = formatDuration(status.startTime);
-          statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${duration}\`;
-          
-          // 定时更新持续时间
-          if (!window.durationTimer) {
-            window.durationTimer = setInterval(() => {
-              const newDuration = formatDuration(status.startTime);
-              statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${newDuration}\`;
-            }, 1000);
-          }
-        }
-      } else {
-        statusDot.classList.remove('active');
-        statusText.textContent = '调试模式已关闭';
-        toggleBtn.textContent = '开启调试';
-        toggleBtn.classList.remove('toggle-off');
-        statusInfo.innerHTML = \`反代目标: ${TARGET_URL}\`;
-        
-        // 清除定时器
-        if (window.durationTimer) {
-          clearInterval(window.durationTimer);
-          window.durationTimer = null;
-        }
-      }
-    }
-    
     // 加载日志
     async function loadLogs() {
       const logList = document.getElementById('logList');
+      logList.innerHTML = '<div class="loading">加载中...</div>';
       
       try {
-        const statusResponse = await fetch('/api/debug/status');
-        const status = await statusResponse.json();
-        
-        if (!status.isDebugMode) {
-          logList.innerHTML = '<div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>';
-          return;
-        }
-        
-        logList.innerHTML = '<div class="loading">加载中...</div>';
-        
         const response = await fetch('/api/logs');
         const logs = await response.json();
         
@@ -438,23 +318,23 @@ function getHtmlIndex(): string {
         let html = '';
         logs.forEach(log => {
           const methodClass = log.method.toLowerCase();
-          html += \`
+          html += `
             <div class="log-item">
               <div class="log-header">
-                <span class="method \${methodClass}">\${log.method}</span>
-                <span class="timestamp">\${formatTimestamp(log.timestamp)}</span>
+                <span class="method ${methodClass}">${log.method}</span>
+                <span class="timestamp">${formatTimestamp(log.timestamp)}</span>
               </div>
-              <div class="log-url">\${log.path}</div>
-              <div class="log-headers" onclick="toggleHeaders('headers-\${log.id}')">
+              <div class="log-url">${log.path}</div>
+              <div class="log-headers" onclick="toggleHeaders('headers-${log.id}')">
                 请求头 (点击展开)
-                <div id="headers-\${log.id}" class="log-headers-content">
-                  <pre>\${JSON.stringify(log.headers, null, 2)}</pre>
+                <div id="headers-${log.id}" class="log-headers-content">
+                  <pre>${JSON.stringify(log.headers, null, 2)}</pre>
                 </div>
               </div>
               <div class="log-body-label">请求体:</div>
-              <pre class="log-body">\${formatBody(log.body)}</pre>
+              <pre class="log-body">${formatBody(log.body)}</pre>
             </div>
-          \`;
+          `;
         });
         
         logList.innerHTML = html;
@@ -488,11 +368,6 @@ function getHtmlIndex(): string {
         if (response.ok) {
           alert('日志已清除');
           loadLogs();
-          
-          // 更新状态信息
-          const statusResponse = await fetch('/api/debug/status');
-          const status = await statusResponse.json();
-          updateDebugStatus(status);
         } else {
           alert('清除日志失败');
         }
@@ -502,138 +377,26 @@ function getHtmlIndex(): string {
       }
     }
     
-    // 页面加载时初始化
-    async function init() {
-      try {
-        const status = await getDebugStatus();
-        updateDebugStatus(status);
-        loadLogs();
-      } catch (error) {
-        console.error('初始化失败:', error);
-      }
-    }
-    
     // 绑定事件处理器
-    document.getElementById('toggleBtn').addEventListener('click', toggleDebugMode);
     document.getElementById('refreshBtn').addEventListener('click', loadLogs);
     document.getElementById('clearBtn').addEventListener('click', clearLogs);
     
-    // 页面加载完成后初始化
-    window.onload = init;
+    // 页面加载完成后加载日志
+    window.onload = loadLogs;
   </script>
 </body>
 </html>
   `;
 }
 
-// 处理调试API
-async function handleDebugApi(request: Request, path: string): Promise<Response> {
-  // 获取调试状态
-  if (path === "/api/debug/status" && request.method === "GET") {
-    return new Response(JSON.stringify({
-      isDebugMode: state.isDebugMode,
-      startTime: state.startTime,
-      logCount: state.logs.length
-    }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-  
-  // 切换调试模式
-  if (path === "/api/debug/toggle" && request.method === "POST") {
-    state.isDebugMode = !state.isDebugMode;
-    
-    if (state.isDebugMode) {
-      state.startTime = Date.now();
-    } else {
-      state.startTime = 0;
-    }
-    
-    return new Response(JSON.stringify({
-      isDebugMode: state.isDebugMode,
-      startTime: state.startTime,
-      logCount: state.logs.length
-    }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-  
-  return new Response(JSON.stringify({ error: "未找到API路由" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" }
-  });
-}
-
-// 处理日志API
-async function handleLogsApi(request: Request): Promise<Response> {
-  // 获取所有日志
-  if (request.method === "GET") {
-    return new Response(JSON.stringify(state.logs), {
-      headers: { "Content-Type": "application/json" }
-    });
-  } 
-  // 清除所有日志
-  else if (request.method === "DELETE") {
-    const success = clearAllRequestLogs();
-    return new Response(JSON.stringify({ success }), {
-      status: success ? 200 : 500,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-  
-  return new Response(JSON.stringify({ error: "不支持的方法" }), {
-    status: 405,
-    headers: { "Content-Type": "application/json" }
-  });
-}
-
-// 处理代理转发
-async function handleProxy(request: Request): Promise<Response> {
-  try {
-    const url = new URL(request.url);
-    const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
-    
-    // 创建新请求
-    const proxyRequest = new Request(targetUrl.toString(), {
-      method: request.method,
-      headers: new Headers(request.headers),
-      body: request.body,
-      redirect: 'follow'
-    });
-    
-    // 删除一些不需要的头部
-    proxyRequest.headers.delete('host');
-    
-    // 执行请求
-    const response = await fetch(proxyRequest);
-    
-    // 构建响应
-    const proxyResponse = new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: new Headers(response.headers)
-    });
-    
-    // 添加CORS头
-    proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
-    
-    return proxyResponse;
-  } catch (error) {
-    console.error('代理请求失败:', error);
-    return new Response(JSON.stringify({ error: '代理请求失败', message: error.message }), {
-      status: 500,
-      headers: { 
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
-  }
-}
-
-// 请求处理函数
+// 修改请求处理函数
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  
+  // 增加更详细的请求日志
+  console.log(`收到请求: ${request.method} ${path}`);
+  console.log(`请求头:`, Object.fromEntries(request.headers.entries()));
   
   // 处理OPTIONS预检请求
   if (request.method === "OPTIONS") {
@@ -642,14 +405,37 @@ async function handleRequest(request: Request): Promise<Response> {
   
   // 处理API请求
   if (path.startsWith("/api/")) {
-    // 调试API
-    if (path.startsWith("/api/debug/")) {
-      return handleDebugApi(request, path);
+    // 获取所有日志
+    if (path === "/api/logs") {
+      if (request.method === "GET") {
+        const logs = await getAllRequestLogs();
+        return new Response(JSON.stringify(logs), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } else if (request.method === "DELETE") {
+        const success = await clearAllRequestLogs();
+        return new Response(JSON.stringify({ success }), {
+          status: success ? 200 : 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
     }
     
-    // 日志API
-    if (path === "/api/logs") {
-      return handleLogsApi(request);
+    // 获取单个日志
+    if (path.startsWith("/api/logs/") && request.method === "GET") {
+      const id = path.substring("/api/logs/".length);
+      const log = await getRequestLog(id);
+      
+      if (log) {
+        return new Response(JSON.stringify(log), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } else {
+        return new Response(JSON.stringify({ error: "日志不存在" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
     }
     
     // 未找到API路由
@@ -668,22 +454,43 @@ async function handleRequest(request: Request): Promise<Response> {
   
   // 记录请求（如果调试模式已开启）
   if (state.isDebugMode) {
-    // 克隆请求体以避免 ReadableStream 被锁定
-    const requestClone = request.clone();
-    let requestBody = "";
-    
-    // 对于GET和HEAD请求，不读取请求体
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      try {
-        requestBody = await requestClone.text();
+    try {
+      // 改进请求体读取方式
+      let requestBody = "";
+      const requestClone = request.clone(); // 克隆请求避免消费原始请求体
+      
+      // 对于GET和HEAD请求，不读取请求体
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        const contentType = request.headers.get("content-type") || "";
+        
+        // 记录内容类型
+        console.log(`内容类型: ${contentType}`);
+        
+        // 特别处理JSON内容
+        if (contentType.includes("application/json")) {
+          try {
+            const jsonBody = await requestClone.json();
+            requestBody = JSON.stringify(jsonBody, null, 2);
+            console.log("成功读取JSON请求体");
+          } catch (e) {
+            console.error("JSON解析失败，尝试读取文本", e);
+            requestBody = await requestClone.clone().text();
+          }
+        } else {
+          // 其他内容类型直接作为文本读取
+          requestBody = await requestClone.text();
+        }
+        
+        // 记录请求体大小
+        console.log(`请求体大小: ${requestBody.length} 字符`);
         logFullContent("请求体", requestBody);
-      } catch (error) {
-        console.error("读取请求体失败:", error);
       }
+      
+      // 保存请求日志
+      saveRequestLog(request, requestBody);
+    } catch (error) {
+      console.error("读取请求体失败:", error);
     }
-    
-    // 保存请求日志
-    saveRequestLog(request, requestBody);
   }
   
   // 转发请求到目标服务器
@@ -691,11 +498,9 @@ async function handleRequest(request: Request): Promise<Response> {
 }
 
 // 服务器启动
-console.log(`启动反代服务器，目标: ${TARGET_URL}`);
 Deno.serve({
   onListen: ({ port }) => {
-    console.log(`服务启动成功，监听端口: ${port}`);
-    console.log(`请访问 http://localhost:${port}/ 打开调试界面`);
+    console.log(`请求记录器服务启动成功，监听端口: ${port}`);
   },
 }, async (request: Request) => {
   try {
@@ -704,4 +509,4 @@ Deno.serve({
     console.error(`请求处理出错:`, error);
     return new Response("Internal Server Error", { status: 500 });
   }
-});
+}); 
