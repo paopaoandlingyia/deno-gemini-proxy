@@ -317,24 +317,7 @@ function getHtmlIndex(): string {
         
         let html = '';
         logs.forEach(log => {
-          const methodClass = log.method.toLowerCase();
-          html += `
-            <div class="log-item">
-              <div class="log-header">
-                <span class="method ${methodClass}">${log.method}</span>
-                <span class="timestamp">${formatTimestamp(log.timestamp)}</span>
-              </div>
-              <div class="log-url">${log.path}</div>
-              <div class="log-headers" onclick="toggleHeaders('headers-${log.id}')">
-                请求头 (点击展开)
-                <div id="headers-${log.id}" class="log-headers-content">
-                  <pre>${JSON.stringify(log.headers, null, 2)}</pre>
-                </div>
-              </div>
-              <div class="log-body-label">请求体:</div>
-              <pre class="log-body">${formatBody(log.body)}</pre>
-            </div>
-          `;
+          html += generateLogItem(log);
         });
         
         logList.innerHTML = html;
@@ -386,6 +369,27 @@ function getHtmlIndex(): string {
   </script>
 </body>
 </html>
+  `;
+}
+
+// 更安全的HTML生成方法
+function generateLogItem(log) {
+  return `
+    <div class='log-item'>
+      <div class='log-header'>
+        <span class='method ${log.method.toLowerCase()}'>${log.method}</span>
+        <span class='timestamp'>${formatTimestamp(log.timestamp)}</span>
+      </div>
+      <div class='log-url'>${log.path}</div>
+      <div class='log-headers' onclick="toggleHeaders('headers-${log.id}')">
+        请求头 (点击展开)
+        <div id='headers-${log.id}' class='log-headers-content'>
+          <pre>${JSON.stringify(log.headers, null, 2)}</pre>
+        </div>
+      </div>
+      <div class='log-body-label'>请求体:</div>
+      <pre class='log-body'>${formatBody(log.body)}</pre>
+    </div>
   `;
 }
 
