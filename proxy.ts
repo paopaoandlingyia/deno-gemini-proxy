@@ -427,17 +427,21 @@ async function logData(label: string, data: Request | Response) {
 
 // 记录特殊请求，无视调试模式状态
 async function logSpecialRequest(label: string, data: Request | Response) {
-  console.log("强制记录特殊请求");
+  console.log("强制记录开始", label);
+  const start = Date.now();
   
-  // 临时启用调试模式
+  // 强制读取body内容
+  const bodyCopy = await data.clone().text().catch(e => `[读取错误] ${e.message}`);
+  console.log(`请求体长度: ${bodyCopy.length} 字符`);
+  
+  // 原始记录逻辑
   const originalDebugMode = isDebugMode;
   isDebugMode = true;
-  
   try {
     await logData(`[强制记录] ${label}`, data);
   } finally {
-    // 恢复原始调试模式状态
     isDebugMode = originalDebugMode;
+    console.log(`记录完成，耗时 ${Date.now() - start}ms`);
   }
 }
 
@@ -558,12 +562,29 @@ async function handleRequest(request: Request): Promise<Response> {
   // 始终记录所有请求
   await logSpecialRequest("收到的客户端请求", request);
 
-  // 简单地转发请求，保留所有头部
+  // 修复1：优先缓冲请求体
+  const requestClone = request.clone();
+  const [bufferedBody, originalBody] = await Promise.all([
+    requestClone.arrayBuffer(),
+    request.arrayBuffer()
+  ]);
+
+  // 修复2：创建完全独立的请求副本
+  const loggableRequest = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: new Uint8Array(bufferedBody)
+  });
+
+  // 修复3：立即记录请求（在转发前完成）
+  await logSpecialRequest("收到的客户端请求", loggableRequest);
+
+  // 修复4：使用原始body进行转发
   const newRequest = new Request(targetUrl.toString(), {
     method: request.method,
     headers: request.headers,
-    body: request.body,
-    redirect: "manual", // 避免自动重定向
+    body: new Uint8Array(originalBody), // 使用未克隆的body
+    redirect: "manual"
   });
     
   // 设置CORS头
