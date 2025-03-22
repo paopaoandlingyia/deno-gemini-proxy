@@ -534,9 +534,9 @@ function getHtmlIndex(): string {
               <div class="log-body-label">原始请求体:</div>
               <pre class="log-body">\${formatBody(log.body)}</pre>
               
-              <!-- 添加目标请求体部分 -->
-              \${log.targetBody && log.targetBody !== log.body ? \`
-                <div class="log-body-label" style="margin-top: 15px; color: #2196F3;">发往目标的请求体:</div>
+              <!-- 修改目标请求体部分 - 始终显示 -->
+              \${log.targetBody ? \`
+                <div class="log-body-label" style="margin-top: 15px; color: #2196F3;">发往目标的请求体 \${log.targetBody === log.body ? '(与原始请求相同)' : ''}:</div>
                 <pre class="log-body" style="border-left: 3px solid #2196F3;">\${formatBody(log.targetBody)}</pre>
               \` : ''}
             </div>
@@ -757,16 +757,31 @@ async function handleProxy(request: Request): Promise<Response> {
         // 记录原始请求内容
         logFullContent("原始请求体", requestBody);
         
-        // 为了发送给目标服务器，我们需要重新创建请求体
-        requestBodyToSend = requestBody;
+        // 为了测试目的，给目标请求体添加一个标记
+        try {
+          // 如果是JSON请求体，尝试修改它
+          const parsedBody = JSON.parse(requestBody);
+          
+          // 添加一个调试字段
+          parsedBody._debug_info = "这是发送到目标服务器的修改版请求体";
+          
+          // 重新序列化
+          requestBodyToSend = JSON.stringify(parsedBody);
+        } catch (e) {
+          // 如果不是JSON，直接使用原请求体
+          console.log("请求体不是JSON格式，不做修改");
+          requestBodyToSend = requestBody;
+        }
         
         // 记录日志
         await saveRequestLog(request, requestBody, requestBodyToSend);
         
-        // 确保打印发送到目标服务器的请求体 (明确放在这个位置)
+        // 确保单独一行打印出来便于查看
+        console.log("\n\n");
         console.log("============= 发送到目标的请求体 =============");
-        logFullContent("发往目标服务器的请求体", requestBodyToSend || "无内容");
+        console.log(requestBodyToSend);
         console.log("================================================");
+        console.log("\n\n");
       } catch (error) {
         console.error("DEBUG: 读取请求体失败:", error);
       }
@@ -877,17 +892,4 @@ async function initState() {
 await initState();
 
 // 服务器启动
-console.log(`启动反代服务器，目标: ${TARGET_URL}`);
-Deno.serve({
-  onListen: ({ port }) => {
-    console.log(`服务启动成功，监听端口: ${port}`);
-    console.log(`请访问 http://localhost:${port}/debug 打开调试界面`);
-  },
-}, async (request: Request) => {
-  try {
-    return await handleRequest(request);
-  } catch (error) {
-    console.error(`请求处理出错:`, error);
-    return new Response("Internal Server Error", { status: 500 });
-  }
-});
+console.log(`
