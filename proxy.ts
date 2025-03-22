@@ -39,6 +39,9 @@ if (ENABLE_KV_STORAGE) {
 
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
+  // 在非调试模式下不执行日志记录
+  if (!state.isDebugMode) return;
+  
   // 使用更简洁的标记
   console.log(`--- ${prefix} 开始 ---`);
   
@@ -871,22 +874,25 @@ async function handleProxy(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    console.log(`转发请求到: ${targetUrl.toString()}`);
+    // 只在调试模式下记录详细日志
+    if (state.isDebugMode) {
+      console.log(`转发请求到: ${targetUrl.toString()}`);
+    }
     
     // 创建代理请求
     const headers = new Headers(request.headers);
     headers.delete('host'); // 删除host头，以防干扰目标服务器
     
-    // 记录并打印将要发送的请求头
-    console.log("--- 向目标服务器发送的请求头 ---");
-    const headersObj: Record<string, string> = {};
-    headers.forEach((value, key) => {
-      headersObj[key] = value;
-      console.log(`${key}: ${value}`);
-    });
-    console.log("--- 请求头记录结束 ---");
+    // 只在调试模式下记录请求头
+    if (state.isDebugMode) {
+      console.log("--- 向目标服务器发送的请求头 ---");
+      headers.forEach((value, key) => {
+        console.log(`${key}: ${value}`);
+      });
+      console.log("--- 请求头记录结束 ---");
+    }
     
-    // 如果需要记录请求体内容
+    // 如果需要记录请求体内容，只在调试模式下执行
     let requestBody = "";
     
     if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
@@ -906,36 +912,42 @@ async function handleProxy(request: Request): Promise<Response> {
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
       headers: headers,
-      body: request.body,  // 使用原始请求体，不做任何修改
+      body: request.body,
       redirect: 'follow'
     });
     
-    console.log(`目标服务器响应状态: ${response.status}`);
+    // 只在调试模式下记录响应状态
+    if (state.isDebugMode) {
+      console.log(`目标服务器响应状态: ${response.status}`);
+    }
     
-    // 克隆响应以便读取响应体
-    const responseClone = response.clone();
+    // 只在调试模式下读取和记录响应体
     let responseBody = "";
-    
-    try {
-      // 读取响应体
-      responseBody = await responseClone.text();
-      console.log("成功读取响应体");
+    if (state.isDebugMode) {
+      // 克隆响应以便读取响应体
+      const responseClone = response.clone();
       
-      // 打印响应体
-      if (responseBody) {
-        logFullContent("目标服务器的响应内容", responseBody);
-      }
-      
-      // 保存日志，包括响应内容
-      if (state.isDebugMode && requestBody) {
-        await saveRequestLog(request, requestBody, responseBody, response.status);
-      }
-    } catch (error) {
-      console.error("读取响应体失败:", error);
-      
-      // 即使失败也要保存日志，但不含响应内容
-      if (state.isDebugMode && requestBody) {
-        await saveRequestLog(request, requestBody, "无法读取响应内容", response.status);
+      try {
+        // 读取响应体
+        responseBody = await responseClone.text();
+        console.log("成功读取响应体");
+        
+        // 打印响应体
+        if (responseBody) {
+          logFullContent("目标服务器的响应内容", responseBody);
+        }
+        
+        // 保存日志，包括响应内容
+        if (requestBody) {
+          await saveRequestLog(request, requestBody, responseBody, response.status);
+        }
+      } catch (error) {
+        console.error("读取响应体失败:", error);
+        
+        // 即使失败也要保存日志，但不含响应内容
+        if (requestBody) {
+          await saveRequestLog(request, requestBody, "无法读取响应内容", response.status);
+        }
       }
     }
     
@@ -971,7 +983,10 @@ async function handleRequest(request: Request): Promise<Response> {
   const path = url.pathname;
   const method = request.method;
   
-  console.log(`收到请求: ${method} ${path}`);
+  // 只在调试模式下记录请求信息
+  if (state.isDebugMode) {
+    console.log(`收到请求: ${method} ${path}`);
+  }
   
   // 处理OPTIONS请求
   if (method === "OPTIONS") {
@@ -980,7 +995,9 @@ async function handleRequest(request: Request): Promise<Response> {
   
   // ===== 调试页面 - 提供可视化界面 =====
   if (path === "/debug" || path === "/debug/") {
-    console.log("提供调试界面");
+    if (state.isDebugMode) {
+      console.log("提供调试界面");
+    }
     return new Response(getHtmlIndex(), {
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
@@ -1030,9 +1047,14 @@ async function initState() {
 await initState();
 
 // 服务器启动
-console.log(`启动反代服务器，目标: ${TARGET_URL}`);
+if (state.isDebugMode) {
+  console.log(`启动反代服务器，目标: ${TARGET_URL}`);
+}
 Deno.serve({
   onListen: ({ port }) => {
+    if (state.isDebugMode) {
+      console.log(`服务器监听端口: ${port}`);
+    }
   },
 }, async (request: Request) => {
   try {
