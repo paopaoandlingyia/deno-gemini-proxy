@@ -355,6 +355,47 @@ function getHtmlIndex(): string {
         margin-bottom: 10px;
       }
     }
+    /* 复制按钮样式 */
+    .copy-button {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      background-color: #f1f1f1;
+      border: 1px solid #ddd;
+      border-radius: 3px;
+      padding: 2px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      opacity: 0.8;
+      transition: opacity 0.3s, background-color 0.3s;
+    }
+    
+    .copy-button:hover {
+      opacity: 1;
+      background-color: #e1e1e1;
+    }
+    
+    .log-body-container {
+      position: relative;
+    }
+    
+    /* 复制成功提示 */
+    .copy-feedback {
+      position: absolute;
+      top: 5px;
+      right: 80px;
+      background-color: #4CAF50;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    
+    .copy-feedback.show {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
@@ -499,6 +540,24 @@ function getHtmlIndex(): string {
       }
     }
     
+    // 复制文本到剪贴板
+    function copyToClipboard(text, buttonId) {
+      navigator.clipboard.writeText(text).then(() => {
+        // 显示复制成功提示
+        const button = document.getElementById(buttonId);
+        const feedback = button.nextElementSibling;
+        feedback.classList.add('show');
+        
+        // 2秒后隐藏提示
+        setTimeout(() => {
+          feedback.classList.remove('show');
+        }, 2000);
+      }).catch(err => {
+        console.error('复制失败:', err);
+        alert('复制失败，请手动复制');
+      });
+    }
+    
     // 加载日志
     async function loadLogs() {
       const logList = document.getElementById('logList');
@@ -523,8 +582,13 @@ function getHtmlIndex(): string {
         }
         
         let html = '';
-        logs.forEach(log => {
+        logs.forEach((log, index) => {
           const methodClass = log.method.toLowerCase();
+          const requestBodyId = \`request-body-\${index}-\${log.id}\`;
+          const responseBodyId = \`response-body-\${index}-\${log.id}\`;
+          const requestCopyBtnId = \`copy-request-\${index}-\${log.id}\`;
+          const responseCopyBtnId = \`copy-response-\${index}-\${log.id}\`;
+          
           html += \`
             <div class="log-item">
               <div class="log-header">
@@ -539,7 +603,11 @@ function getHtmlIndex(): string {
                 </div>
               </div>
               <div class="log-body-label">原始请求体:</div>
-              <pre class="log-body">\${formatBody(log.body)}</pre>
+              <div class="log-body-container">
+                <pre id="\${requestBodyId}" class="log-body">\${formatBody(log.body)}</pre>
+                <button id="\${requestCopyBtnId}" class="copy-button" onclick="copyToClipboard(document.getElementById('\${requestBodyId}').textContent, '\${requestCopyBtnId}')">复制</button>
+                <div class="copy-feedback">已复制!</div>
+              </div>
               
               <!-- 添加响应内容部分 -->
               \${log.responseBody ? \`
@@ -549,7 +617,11 @@ function getHtmlIndex(): string {
                     状态码: \${log.responseStatus || '未知'}
                   </span>
                 </div>
-                <pre class="log-body" style="border-left: 4px solid #2196F3;">\${formatBody(log.responseBody)}</pre>
+                <div class="log-body-container">
+                  <pre id="\${responseBodyId}" class="log-body" style="border-left: 4px solid #2196F3;">\${formatBody(log.responseBody)}</pre>
+                  <button id="\${responseCopyBtnId}" class="copy-button" onclick="copyToClipboard(document.getElementById('\${responseBodyId}').textContent, '\${responseCopyBtnId}')">复制</button>
+                  <div class="copy-feedback">已复制!</div>
+                </div>
               \` : ''}
             </div>
           \`;
