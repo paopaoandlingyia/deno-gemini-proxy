@@ -890,6 +890,3 @@ async function initState() {
 
 // 初始化状态并启动服务器
 await initState();
-
-// 服务器启动
-console.log(`
