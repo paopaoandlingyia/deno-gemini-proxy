@@ -15,7 +15,8 @@ interface RequestLog {
   path: string;
   headers: Record<string, string>;
   body: string;
-  targetBody?: string; // 添加目标请求体字段
+  responseBody?: string;  // 新增：目标服务器响应内容
+  responseStatus?: number; // 新增：响应状态码
   clientIP: string;
 }
 
@@ -56,7 +57,12 @@ function logFullContent(prefix: string, content: string) {
 }
 
 // 保存请求日志到内存或KV存储
-async function saveRequestLog(request: Request, requestBody: string, targetBody?: string) {
+async function saveRequestLog(
+  request: Request, 
+  requestBody: string, 
+  responseBody?: string,
+  responseStatus?: number
+) {
   if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
   
   const timestamp = Date.now();
@@ -71,7 +77,8 @@ async function saveRequestLog(request: Request, requestBody: string, targetBody?
     path: url.pathname,
     headers: Object.fromEntries(request.headers.entries()),
     body: requestBody,
-    targetBody: targetBody || requestBody, // 保存目标请求体
+    responseBody,        // 保存响应内容
+    responseStatus,      // 保存响应状态码
     clientIP: request.headers.get("x-forwarded-for") || "unknown"
   };
   
@@ -534,15 +541,15 @@ function getHtmlIndex(): string {
               <div class="log-body-label">原始请求体:</div>
               <pre class="log-body">\${formatBody(log.body)}</pre>
               
-              <!-- 修改目标请求体部分 - 更明显地显示差异 -->
-              \${log.targetBody ? \`
-                <div class="log-body-label" style="margin-top: 15px; color: #2196F3; font-weight: bold;">发往目标的请求体:</div>
-                <div style="margin-bottom: 5px; color: #666;">
-                  <span style="background-color: \${log.targetBody === log.body ? '#f0f0f0' : '#e8f5e9'}; padding: 3px 6px; border-radius: 4px; font-size: 0.85em;">
-                    \${log.targetBody === log.body ? '⚠️ 与原始请求相同' : '✅ 已修改（与原始请求不同）'}
+              <!-- 添加响应内容部分 -->
+              \${log.responseBody ? \`
+                <div class="log-body-label" style="margin-top: 15px; color: #2196F3; font-weight: bold;">
+                  目标服务器响应内容: 
+                  <span style="background-color: \${log.responseStatus && log.responseStatus >= 200 && log.responseStatus < 300 ? '#e8f5e9' : '#ffebee'}; padding: 3px 6px; border-radius: 4px; font-size: 0.85em;">
+                    状态码: \${log.responseStatus || '未知'}
                   </span>
                 </div>
-                <pre class="log-body" style="border-left: 4px solid #2196F3;">\${formatBody(log.targetBody)}</pre>
+                <pre class="log-body" style="border-left: 4px solid #2196F3;">\${formatBody(log.responseBody)}</pre>
               \` : ''}
             </div>
           \`;
@@ -825,6 +832,37 @@ async function handleProxy(request: Request): Promise<Response> {
     });
     
     console.log(`DEBUG: 目标服务器响应状态: ${response.status}`);
+    
+    // 克隆响应以便读取响应体
+    const responseClone = response.clone();
+    let responseBody = "";
+    
+    try {
+      // 读取响应体
+      responseBody = await responseClone.text();
+      console.log("DEBUG: 成功读取响应体");
+      
+      // 打印响应体
+      if (responseBody) {
+        console.log("\n\n");
+        console.log("============= 目标服务器的响应内容 =============");
+        logFullContent("响应内容", responseBody);
+        console.log("================================================");
+        console.log("\n\n");
+      }
+      
+      // 保存日志，包括响应内容
+      if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
+        await saveRequestLog(request, requestBody, responseBody, response.status);
+      }
+    } catch (error) {
+      console.error("DEBUG: 读取响应体失败:", error);
+      
+      // 即使失败也要保存日志，但不含响应内容
+      if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
+        await saveRequestLog(request, requestBody, "无法读取响应内容", response.status);
+      }
+    }
     
     // 构建响应
     const proxyResponse = new Response(response.body, {
