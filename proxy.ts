@@ -15,6 +15,7 @@ interface RequestLog {
   path: string;
   headers: Record<string, string>;
   body: string;
+  targetBody?: string; // 添加目标请求体字段
   clientIP: string;
 }
 
@@ -38,7 +39,8 @@ if (ENABLE_KV_STORAGE) {
 
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
-  console.log(`${prefix} 开始 >>>>>>>>`);
+  const marker = "!!!!!!!!!!!!!!!!!!!!!!!!!";
+  console.log(`${marker} ${prefix} 开始 ${marker}`);
   
   // 每段最大长度
   const chunkSize = 1000;
@@ -47,14 +49,14 @@ function logFullContent(prefix: string, content: string) {
   for(let i = 0; i < chunks; i++) {
     const start = i * chunkSize;
     const end = Math.min((i + 1) * chunkSize, content.length);
-    console.log(`[第${i+1}/${chunks}段] ${content.slice(start, end)}`);
+    console.log(`DEBUG-LOG [${i+1}/${chunks}]: ${content.slice(start, end)}`);
   }
   
-  console.log(`${prefix} 结束 <<<<<<<< (总长度: ${content.length})`);
+  console.log(`${marker} ${prefix} 结束 (总长度: ${content.length}) ${marker}`);
 }
 
 // 保存请求日志到内存或KV存储
-async function saveRequestLog(request: Request, requestBody: string) {
+async function saveRequestLog(request: Request, requestBody: string, targetBody?: string) {
   if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
   
   const timestamp = Date.now();
@@ -69,6 +71,7 @@ async function saveRequestLog(request: Request, requestBody: string) {
     path: url.pathname,
     headers: Object.fromEntries(request.headers.entries()),
     body: requestBody,
+    targetBody: targetBody || requestBody, // 保存目标请求体
     clientIP: request.headers.get("x-forwarded-for") || "unknown"
   };
   
@@ -528,8 +531,14 @@ function getHtmlIndex(): string {
                   <pre>\${JSON.stringify(log.headers, null, 2)}</pre>
                 </div>
               </div>
-              <div class="log-body-label">请求体:</div>
+              <div class="log-body-label">原始请求体:</div>
               <pre class="log-body">\${formatBody(log.body)}</pre>
+              
+              <!-- 添加目标请求体部分 -->
+              \${log.targetBody && log.targetBody !== log.body ? \`
+                <div class="log-body-label" style="margin-top: 15px; color: #2196F3;">发往目标的请求体:</div>
+                <pre class="log-body" style="border-left: 3px solid #2196F3;">\${formatBody(log.targetBody)}</pre>
+              \` : ''}
             </div>
           \`;
         });
@@ -725,7 +734,7 @@ async function handleProxy(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    console.log(`转发请求到: ${targetUrl.toString()}`);
+    console.log(`DEBUG: 转发请求到: ${targetUrl.toString()}`);
     
     // 创建代理请求
     const headers = new Headers(request.headers);
@@ -737,28 +746,36 @@ async function handleProxy(request: Request): Promise<Response> {
     
     if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
       try {
+        console.log("DEBUG: 准备读取和处理请求体");
+        
         // 克隆请求以便可以多次读取body
         const requestClone = request.clone();
         requestBody = await requestClone.text();
         
+        console.log(`DEBUG: 成功读取请求体，长度: ${requestBody.length}`);
+        
         // 记录原始请求内容
         logFullContent("原始请求体", requestBody);
-        
-        // 记录日志
-        await saveRequestLog(request, requestBody);
         
         // 为了发送给目标服务器，我们需要重新创建请求体
         requestBodyToSend = requestBody;
         
+        // 记录日志
+        await saveRequestLog(request, requestBody, requestBodyToSend);
+        
         // 确保打印发送到目标服务器的请求体 (明确放在这个位置)
-        console.log("------------------------------");
+        console.log("============= 发送到目标的请求体 =============");
         logFullContent("发往目标服务器的请求体", requestBodyToSend || "无内容");
-        console.log("------------------------------");
+        console.log("================================================");
       } catch (error) {
-        console.error("读取请求体失败:", error);
+        console.error("DEBUG: 读取请求体失败:", error);
       }
+    } else {
+      console.log(`DEBUG: 跳过请求体处理 (调试模式: ${state.isDebugMode}, 方法: ${request.method})`);
     }
 
+    console.log("DEBUG: 准备发送请求到目标服务器");
+    
     // 发送请求到目标服务器
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
@@ -766,6 +783,8 @@ async function handleProxy(request: Request): Promise<Response> {
       body: requestBodyToSend !== null ? requestBodyToSend : request.body,
       redirect: 'follow'
     });
+    
+    console.log(`DEBUG: 目标服务器响应状态: ${response.status}`);
     
     // 构建响应
     const proxyResponse = new Response(response.body, {
@@ -779,7 +798,7 @@ async function handleProxy(request: Request): Promise<Response> {
     
     return proxyResponse;
   } catch (error) {
-    console.error('代理请求失败:', error);
+    console.error('DEBUG: 代理请求失败:', error);
     return new Response(JSON.stringify({
       error: '代理请求失败',
       message: error.message
