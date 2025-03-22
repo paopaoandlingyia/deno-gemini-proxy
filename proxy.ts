@@ -83,15 +83,19 @@ async function saveRequestLog(request: Request, requestBody: string) {
   // 如果启用了KV存储，也保存到KV
   if (kv) {
     try {
+      // 设置10分钟过期时间
+      const expirationMs = 10 * 60 * 1000; // 10分钟
+      const expireAt = new Date(Date.now() + expirationMs);
+      
       // 使用logEntry.id作为主键，确保唯一性
-      await kv.set(["logs", logEntry.id], logEntry);
+      await kv.set(["logs", logEntry.id], logEntry, { expireAt });
       
       // 另外保存一个有序的日志ID列表，用于分页查询
       const logIds = await kv.get<string[]>(["logIds"]);
       const newLogIds = [logEntry.id, ...(logIds?.value || [])].slice(0, MAX_LOGS);
-      await kv.set(["logIds"], newLogIds);
+      await kv.set(["logIds"], newLogIds, { expireAt });
       
-      console.log(`日志已保存到KV存储: ${requestId}`);
+      console.log(`日志已保存到KV存储: ${requestId}，将在${expireAt.toLocaleString()}过期`);
     } catch (error) {
       console.error("保存日志到KV存储失败:", error);
     }
@@ -628,10 +632,14 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
       
       // 如果使用KV存储，也保存调试状态
       if (kv) {
+        // 调试状态设置较长过期时间，如12小时
+        const expirationMs = 12 * 60 * 60 * 1000; 
+        const expireAt = new Date(Date.now() + expirationMs);
+        
         await kv.set(["debugState"], {
           isDebugMode: true,
           startTime: state.startTime
-        });
+        }, { expireAt });
       }
     } else {
       state.startTime = 0;
@@ -719,6 +727,8 @@ async function handleProxy(request: Request): Promise<Response> {
     
     // 如果需要记录请求体内容
     let requestBody = "";
+    let requestBodyToSend = null;
+    
     if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
       try {
         // 克隆请求以便可以多次读取body
@@ -730,21 +740,21 @@ async function handleProxy(request: Request): Promise<Response> {
         
         // 记录日志
         await saveRequestLog(request, requestBody);
+        
+        // 为了发送给目标服务器，我们需要重新创建请求体
+        requestBodyToSend = requestBody;
       } catch (error) {
         console.error("读取请求体失败:", error);
       }
     }
 
-    // 打印发送到目标服务器的请求体
-    if (state.isDebugMode && requestBody) {
-      logFullContent("发往目标服务器的请求体", requestBody);
-    }
-    
     // 发送请求到目标服务器
+    logFullContent("发往目标服务器的请求体", requestBodyToSend || "无内容");
+    
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
       headers: headers,
-      body: request.body,
+      body: requestBodyToSend ? requestBodyToSend : request.body,
       redirect: 'follow'
     });
     
