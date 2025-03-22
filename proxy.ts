@@ -4,6 +4,7 @@ import { serve } from "https://deno.land/std@0.220.1/http/server.ts";
 // 配置
 const TARGET_URL = Deno.env.get("TARGET_URL") || "https://generativelanguage.googleapis.com"; // 默认反代目标
 const MAX_LOGS = 100; // 最大保存日志数量
+const ENABLE_KV_STORAGE = true; // 是否启用KV存储，可以在不同实例间共享日志
 
 // 请求日志存储
 interface RequestLog {
@@ -24,6 +25,17 @@ const state = {
   startTime: 0, // 调试模式开始时间
 };
 
+// 初始化KV存储
+let kv: Deno.Kv | null = null;
+if (ENABLE_KV_STORAGE) {
+  try {
+    kv = await Deno.openKv();
+    console.log("KV存储初始化成功");
+  } catch (error) {
+    console.error("KV存储初始化失败:", error);
+  }
+}
+
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
   console.log(`${prefix} 开始 >>>>>>>>`);
@@ -41,8 +53,8 @@ function logFullContent(prefix: string, content: string) {
   console.log(`${prefix} 结束 <<<<<<<< (总长度: ${content.length})`);
 }
 
-// 保存请求日志到内存
-function saveRequestLog(request: Request, requestBody: string) {
+// 保存请求日志到内存或KV存储
+async function saveRequestLog(request: Request, requestBody: string) {
   if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
   
   const timestamp = Date.now();
@@ -60,7 +72,7 @@ function saveRequestLog(request: Request, requestBody: string) {
     clientIP: request.headers.get("x-forwarded-for") || "unknown"
   };
   
-  // 添加到日志数组前面
+  // 保存到内存
   state.logs.unshift(logEntry);
   
   // 保持日志数不超过最大值
@@ -68,14 +80,69 @@ function saveRequestLog(request: Request, requestBody: string) {
     state.logs = state.logs.slice(0, MAX_LOGS);
   }
   
+  // 如果启用了KV存储，也保存到KV
+  if (kv) {
+    try {
+      // 使用logEntry.id作为主键，确保唯一性
+      await kv.set(["logs", logEntry.id], logEntry);
+      
+      // 另外保存一个有序的日志ID列表，用于分页查询
+      const logIds = await kv.get<string[]>(["logIds"]);
+      const newLogIds = [logEntry.id, ...(logIds?.value || [])].slice(0, MAX_LOGS);
+      await kv.set(["logIds"], newLogIds);
+      
+      console.log(`日志已保存到KV存储: ${requestId}`);
+    } catch (error) {
+      console.error("保存日志到KV存储失败:", error);
+    }
+  }
+  
   console.log(`保存请求日志: ${requestId}`);
   return requestId;
 }
 
-// 清除所有请求日志
-function clearAllRequestLogs(): boolean {
+// 从KV存储获取日志
+async function getLogsFromKV(): Promise<RequestLog[]> {
+  if (!kv) return [];
+  
   try {
+    const logIds = await kv.get<string[]>(["logIds"]);
+    if (!logIds?.value || logIds.value.length === 0) return [];
+    
+    const logs: RequestLog[] = [];
+    for (const id of logIds.value) {
+      const log = await kv.get<RequestLog>(["logs", id]);
+      if (log?.value) {
+        logs.push(log.value);
+      }
+    }
+    
+    return logs;
+  } catch (error) {
+    console.error("从KV存储获取日志失败:", error);
+    return [];
+  }
+}
+
+// 清除所有请求日志
+async function clearAllRequestLogs(): Promise<boolean> {
+  try {
+    // 清除内存中的日志
     state.logs = [];
+    
+    // 如果启用了KV存储，也清除KV中的日志
+    if (kv) {
+      const logIds = await kv.get<string[]>(["logIds"]);
+      if (logIds?.value) {
+        // 删除所有日志条目
+        for (const id of logIds.value) {
+          await kv.delete(["logs", id]);
+        }
+      }
+      // 清空日志ID列表
+      await kv.delete(["logIds"]);
+    }
+    
     console.log("已清除所有请求日志");
     return true;
   } catch (error) {
@@ -530,10 +597,23 @@ function getHtmlIndex(): string {
 async function handleDebugApi(request: Request, path: string): Promise<Response> {
   // 获取调试状态
   if (path === "/api/debug/status" && request.method === "GET") {
+    // 如果使用KV存储，获取最新的日志计数
+    let logCount = state.logs.length;
+    if (kv && state.isDebugMode) {
+      try {
+        const logIds = await kv.get<string[]>(["logIds"]);
+        if (logIds?.value) {
+          logCount = logIds.value.length;
+        }
+      } catch (error) {
+        console.error("获取KV日志计数失败:", error);
+      }
+    }
+    
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
       startTime: state.startTime,
-      logCount: state.logs.length
+      logCount: logCount
     }), {
       headers: { "Content-Type": "application/json" }
     });
@@ -545,14 +625,43 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     
     if (state.isDebugMode) {
       state.startTime = Date.now();
+      
+      // 如果使用KV存储，也保存调试状态
+      if (kv) {
+        await kv.set(["debugState"], {
+          isDebugMode: true,
+          startTime: state.startTime
+        });
+      }
     } else {
       state.startTime = 0;
+      
+      // 如果使用KV存储，更新调试状态
+      if (kv) {
+        await kv.set(["debugState"], {
+          isDebugMode: false,
+          startTime: 0
+        });
+      }
+    }
+    
+    // 获取当前日志计数
+    let logCount = state.logs.length;
+    if (kv && state.isDebugMode) {
+      try {
+        const logIds = await kv.get<string[]>(["logIds"]);
+        if (logIds?.value) {
+          logCount = logIds.value.length;
+        }
+      } catch (error) {
+        console.error("获取KV日志计数失败:", error);
+      }
     }
     
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
       startTime: state.startTime,
-      logCount: state.logs.length
+      logCount: logCount
     }), {
       headers: { "Content-Type": "application/json" }
     });
@@ -568,13 +677,22 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
 async function handleLogsApi(request: Request): Promise<Response> {
   // 获取所有日志
   if (request.method === "GET") {
-    return new Response(JSON.stringify(state.logs), {
-      headers: { "Content-Type": "application/json" }
-    });
+    if (kv && state.isDebugMode) {
+      // 从KV存储获取日志
+      const logs = await getLogsFromKV();
+      return new Response(JSON.stringify(logs), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } else {
+      // 从内存获取日志
+      return new Response(JSON.stringify(state.logs), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
   } 
   // 清除所有日志
   else if (request.method === "DELETE") {
-    const success = clearAllRequestLogs();
+    const success = await clearAllRequestLogs();
     return new Response(JSON.stringify({ success }), {
       status: success ? 200 : 500,
       headers: { "Content-Type": "application/json" }
@@ -599,6 +717,30 @@ async function handleProxy(request: Request): Promise<Response> {
     const headers = new Headers(request.headers);
     headers.delete('host'); // 删除host头，以防干扰目标服务器
     
+    // 如果需要记录请求体内容
+    let requestBody = "";
+    if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
+      try {
+        // 克隆请求以便可以多次读取body
+        const requestClone = request.clone();
+        requestBody = await requestClone.text();
+        
+        // 记录原始请求内容
+        logFullContent("原始请求体", requestBody);
+        
+        // 记录日志
+        await saveRequestLog(request, requestBody);
+      } catch (error) {
+        console.error("读取请求体失败:", error);
+      }
+    }
+
+    // 打印发送到目标服务器的请求体
+    if (state.isDebugMode && requestBody) {
+      logFullContent("发往目标服务器的请求体", requestBody);
+    }
+    
+    // 发送请求到目标服务器
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
       headers: headers,
@@ -645,9 +787,9 @@ async function handleRequest(request: Request): Promise<Response> {
     return handleOptionsRequest();
   }
   
-  // ===== 主页 - 提供可视化界面 =====
-  if (path === "/" || path === "") {
-    console.log("提供主页界面");
+  // ===== 调试页面 - 提供可视化界面 =====
+  if (path === "/debug" || path === "/debug/") {
+    console.log("提供调试界面");
     return new Response(getHtmlIndex(), {
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
@@ -673,48 +815,35 @@ async function handleRequest(request: Request): Promise<Response> {
   }
   
   // ===== 代理请求处理 =====
-  if (state.isDebugMode && method !== "GET" && method !== "HEAD") {
-    try {
-      // 在转发前读取请求体
-      const requestClone = request.clone();
-      const requestBody = await requestClone.text();
-      
-      // 记录请求信息
-      const timestamp = Date.now();
-      const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
-      
-      const logEntry: RequestLog = {
-        id: requestId,
-        timestamp,
-        method,
-        url: request.url,
-        path,
-        headers: Object.fromEntries(request.headers.entries()),
-        body: requestBody || "[请求体为空]",
-        clientIP: request.headers.get("x-forwarded-for") || "unknown"
-      };
-      
-      state.logs.unshift(logEntry);
-      if (state.logs.length > MAX_LOGS) {
-        state.logs = state.logs.slice(0, MAX_LOGS);
-      }
-      
-      logFullContent("请求体", requestBody);
-    } catch (error) {
-      console.error("读取请求体失败:", error);
-    }
-  }
-  
-  // 转发请求
   return handleProxy(request);
 }
+
+// 初始化KV状态
+async function initState() {
+  if (kv) {
+    try {
+      // 从KV存储中恢复调试状态
+      const debugState = await kv.get<{isDebugMode: boolean, startTime: number}>(["debugState"]);
+      if (debugState?.value) {
+        state.isDebugMode = debugState.value.isDebugMode;
+        state.startTime = debugState.value.startTime;
+        console.log(`从KV恢复调试状态: isDebugMode=${state.isDebugMode}, startTime=${state.startTime}`);
+      }
+    } catch (error) {
+      console.error("从KV恢复状态失败:", error);
+    }
+  }
+}
+
+// 初始化状态并启动服务器
+await initState();
 
 // 服务器启动
 console.log(`启动反代服务器，目标: ${TARGET_URL}`);
 Deno.serve({
   onListen: ({ port }) => {
     console.log(`服务启动成功，监听端口: ${port}`);
-    console.log(`请访问 http://localhost:${port}/ 打开调试界面`);
+    console.log(`请访问 http://localhost:${port}/debug 打开调试界面`);
   },
 }, async (request: Request) => {
   try {
