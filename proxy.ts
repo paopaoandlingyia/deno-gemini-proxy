@@ -32,7 +32,6 @@ let kv: Deno.Kv | null = null;
 if (ENABLE_KV_STORAGE) {
   try {
     kv = await Deno.openKv();
-    console.log("KV存储初始化成功");
   } catch (error) {
     console.error("KV存储初始化失败:", error);
   }
@@ -40,8 +39,8 @@ if (ENABLE_KV_STORAGE) {
 
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
-  const marker = "!!!!!!!!!!!!!!!!!!!!!!!!!";
-  console.log(`${marker} ${prefix} 开始 ${marker}`);
+  // 使用更简洁的标记
+  console.log(`--- ${prefix} 开始 ---`);
   
   // 每段最大长度
   const chunkSize = 1000;
@@ -50,10 +49,40 @@ function logFullContent(prefix: string, content: string) {
   for(let i = 0; i < chunks; i++) {
     const start = i * chunkSize;
     const end = Math.min((i + 1) * chunkSize, content.length);
-    console.log(`DEBUG-LOG [${i+1}/${chunks}]: ${content.slice(start, end)}`);
+    console.log(`${prefix} [${i+1}/${chunks}]: ${content.slice(start, end)}`);
   }
   
-  console.log(`${marker} ${prefix} 结束 (总长度: ${content.length}) ${marker}`);
+  console.log(`--- ${prefix} 结束 (总长度: ${content.length}) ---`);
+}
+
+// 添加处理base64内容的函数
+function compressContent(content: string): string {
+  if (!content) return content;
+
+  try {
+    // 检测并替换可能的base64段
+    // 匹配至少80个连续的base64字符
+    const base64Regex = /[A-Za-z0-9+/=]{80,}/g;
+    
+    // 替换为压缩提示，并计数
+    let compressedContent = content;
+    const matches = content.match(base64Regex) || [];
+    
+    if (matches.length > 0) {
+      // 替换每个匹配项
+      matches.forEach((match, index) => {
+        const placeholder = `[base64内容 #${index+1}, 长度: ${match.length}字符]`;
+        compressedContent = compressedContent.replace(match, placeholder);
+      });
+      
+      console.log(`已压缩 ${matches.length} 个base64片段，节省约 ${Math.floor(matches.join('').length / 1024)} KB`);
+    }
+    
+    return compressedContent;
+  } catch (error) {
+    console.error("压缩内容时出错:", error);
+    return content; // 发生错误时返回原始内容
+  }
 }
 
 // 保存请求日志到内存或KV存储
@@ -69,6 +98,10 @@ async function saveRequestLog(
   const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
   const url = new URL(request.url);
   
+  // 压缩请求体和响应体
+  const compressedRequestBody = compressContent(requestBody);
+  const compressedResponseBody = responseBody ? compressContent(responseBody) : undefined;
+  
   const logEntry: RequestLog = {
     id: requestId,
     timestamp,
@@ -76,9 +109,9 @@ async function saveRequestLog(
     url: request.url,
     path: url.pathname,
     headers: Object.fromEntries(request.headers.entries()),
-    body: requestBody,
-    responseBody,        // 保存响应内容
-    responseStatus,      // 保存响应状态码
+    body: compressedRequestBody, // 使用压缩后的请求体
+    responseBody: compressedResponseBody, // 使用压缩后的响应体
+    responseStatus,
     clientIP: request.headers.get("x-forwarded-for") || "unknown"
   };
   
@@ -355,46 +388,66 @@ function getHtmlIndex(): string {
         margin-bottom: 10px;
       }
     }
-    /* 复制按钮样式 */
+    /* 复制按钮样式优化 */
     .copy-button {
       position: absolute;
       top: 5px;
-      right: 5px;
-      background-color: #f1f1f1;
-      border: 1px solid #ddd;
-      border-radius: 3px;
-      padding: 2px 8px;
+      right: 25px; /* 移到滚动条左侧 */
+      background-color: #e9f5ff;
+      border: 1px solid #c8e1ff;
+      border-radius: 4px;
+      padding: 3px 8px;
       font-size: 12px;
       cursor: pointer;
-      opacity: 0.8;
-      transition: opacity 0.3s, background-color 0.3s;
+      opacity: 0.7;
+      transition: all 0.3s;
+      display: flex;
+      align-items: center;
+      color: #0366d6;
     }
     
     .copy-button:hover {
       opacity: 1;
-      background-color: #e1e1e1;
+      background-color: #daeeff;
     }
     
-    .log-body-container {
-      position: relative;
+    /* 添加复制图标 */
+    .copy-button::before {
+      content: "📋";
+      margin-right: 4px;
+      font-size: 14px;
     }
     
-    /* 复制成功提示 */
+    /* 复制成功提示优化 */
     .copy-feedback {
       position: absolute;
       top: 5px;
-      right: 80px;
-      background-color: #4CAF50;
+      right: 90px; /* 调整位置 */
+      background-color: #28a745;
       color: white;
-      padding: 2px 8px;
-      border-radius: 3px;
+      padding: 3px 10px;
+      border-radius: 4px;
       font-size: 12px;
       opacity: 0;
       transition: opacity 0.3s;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
     
     .copy-feedback.show {
       opacity: 1;
+    }
+    
+    /* 在悬停时才显示按钮 */
+    .log-body-container {
+      position: relative;
+    }
+    
+    .log-body-container .copy-button {
+      opacity: 0.3;
+    }
+    
+    .log-body-container:hover .copy-button {
+      opacity: 0.8;
     }
   </style>
 </head>
@@ -971,8 +1024,6 @@ await initState();
 console.log(`启动反代服务器，目标: ${TARGET_URL}`);
 Deno.serve({
   onListen: ({ port }) => {
-    console.log(`服务启动成功，监听端口: ${port}`);
-    console.log(`请访问 http://localhost:${port}/debug 打开调试界面`);
   },
 }, async (request: Request) => {
   try {
