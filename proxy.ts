@@ -877,6 +877,15 @@ async function handleProxy(request: Request): Promise<Response> {
     const headers = new Headers(request.headers);
     headers.delete('host'); // 删除host头，以防干扰目标服务器
     
+    // 记录并打印将要发送的请求头
+    console.log("--- 向目标服务器发送的请求头 ---");
+    const headersObj: Record<string, string> = {};
+    headers.forEach((value, key) => {
+      headersObj[key] = value;
+      console.log(`${key}: ${value}`);
+    });
+    console.log("--- 请求头记录结束 ---");
+    
     // 如果需要记录请求体内容
     let requestBody = "";
     
