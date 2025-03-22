@@ -87,15 +87,26 @@ async function saveRequestLog(request: Request, requestBody: string) {
       const expirationMs = 10 * 60 * 1000; // 10分钟
       const expireAt = new Date(Date.now() + expirationMs);
       
-      // 使用logEntry.id作为主键，确保唯一性
-      await kv.set(["logs", logEntry.id], logEntry, { expireAt });
+      // 先获取现有的logIds，防止并发问题
+      const existingLogIds = await kv.get<string[]>(["logIds"]);
+      let newLogIds = [requestId];
       
-      // 另外保存一个有序的日志ID列表，用于分页查询
-      const logIds = await kv.get<string[]>(["logIds"]);
-      const newLogIds = [logEntry.id, ...(logIds?.value || [])].slice(0, MAX_LOGS);
+      if (existingLogIds?.value) {
+        // 确保不重复添加
+        if (!existingLogIds.value.includes(requestId)) {
+          newLogIds = [requestId, ...existingLogIds.value].slice(0, MAX_LOGS);
+        } else {
+          newLogIds = existingLogIds.value;
+        }
+      }
+      
+      // 保存日志内容
+      await kv.set(["logs", requestId], logEntry, { expireAt });
+      
+      // 更新日志ID列表
       await kv.set(["logIds"], newLogIds, { expireAt });
       
-      console.log(`日志已保存到KV存储: ${requestId}，将在${expireAt.toLocaleString()}过期`);
+      console.log(`日志已保存到KV存储: ${requestId}，当前总数: ${newLogIds.length}，将在${expireAt.toLocaleString()}过期`);
     } catch (error) {
       console.error("保存日志到KV存储失败:", error);
     }
@@ -455,18 +466,13 @@ function getHtmlIndex(): string {
         toggleBtn.textContent = '关闭调试';
         toggleBtn.classList.add('toggle-off');
         
-        // 更新持续时间
-        if (status.startTime) {
-          const duration = formatDuration(status.startTime);
-          statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${duration}\`;
-          
-          // 定时更新持续时间
-          if (!window.durationTimer) {
-            window.durationTimer = setInterval(() => {
-              const newDuration = formatDuration(status.startTime);
-              statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求 · 已开启 \${newDuration}\`;
-            }, 1000);
-          }
+        // 简化状态显示，只显示记录数和目标URL
+        statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求\`;
+        
+        // 清除定时器如果存在
+        if (window.durationTimer) {
+          clearInterval(window.durationTimer);
+          window.durationTimer = null;
         }
       } else {
         statusDot.classList.remove('active');
@@ -743,18 +749,21 @@ async function handleProxy(request: Request): Promise<Response> {
         
         // 为了发送给目标服务器，我们需要重新创建请求体
         requestBodyToSend = requestBody;
+        
+        // 确保打印发送到目标服务器的请求体 (明确放在这个位置)
+        console.log("------------------------------");
+        logFullContent("发往目标服务器的请求体", requestBodyToSend || "无内容");
+        console.log("------------------------------");
       } catch (error) {
         console.error("读取请求体失败:", error);
       }
     }
 
     // 发送请求到目标服务器
-    logFullContent("发往目标服务器的请求体", requestBodyToSend || "无内容");
-    
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
       headers: headers,
-      body: requestBodyToSend ? requestBodyToSend : request.body,
+      body: requestBodyToSend !== null ? requestBodyToSend : request.body,
       redirect: 'follow'
     });
     
