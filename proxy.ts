@@ -746,7 +746,7 @@ async function handleProxy(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    console.log(`DEBUG: 转发请求到: ${targetUrl.toString()}`);
+    console.log(`转发请求到: ${targetUrl.toString()}`);
     
     // 创建代理请求
     const headers = new Headers(request.headers);
@@ -754,84 +754,29 @@ async function handleProxy(request: Request): Promise<Response> {
     
     // 如果需要记录请求体内容
     let requestBody = "";
-    let requestBodyToSend = null;
     
     if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
       try {
-        console.log("DEBUG: 准备读取和处理请求体");
-        
-        // 改用更可靠的方式读取请求体
-        let requestBody = "";
-        try {
-          const requestClone = request.clone();
-          const arrayBuffer = await requestClone.arrayBuffer();
-          const decoder = new TextDecoder();
-          requestBody = decoder.decode(arrayBuffer);
-          console.log(`DEBUG: 成功以二进制方式读取请求体，长度: ${requestBody.length}`);
-        } catch (e) {
-          console.error("DEBUG: 二进制读取失败，尝试text()方法:", e);
-          const requestClone = request.clone();
-          requestBody = await requestClone.text();
-        }
+        // 读取请求体
+        const requestClone = request.clone();
+        requestBody = await requestClone.text();
         
         // 记录原始请求内容
         logFullContent("原始请求体", requestBody);
-        
-        // 为了测试目的，给目标请求体添加一个标记
-        try {
-          // 如果是JSON请求体，尝试修改它
-          const parsedBody = JSON.parse(requestBody);
-          
-          // 添加非常明显的调试字段
-          parsedBody._debug_uuid = crypto.randomUUID(); // 添加随机UUID确保每次都不同
-          parsedBody._debug_timestamp = Date.now();
-          
-          // 重新序列化
-          requestBodyToSend = JSON.stringify(parsedBody);
-          
-          // 确认两个请求体不同
-          console.log("DEBUG: 原始请求体与目标请求体是否相同:", requestBody === requestBodyToSend ? "相同" : "不同");
-          console.log("DEBUG: 添加了调试字段:", {_debug_uuid: parsedBody._debug_uuid, _debug_timestamp: parsedBody._debug_timestamp});
-        } catch (e) {
-          // 如果不是JSON，尝试其他方式标记
-          console.log("请求体不是JSON格式，尝试其他标记方式");
-          if (typeof requestBody === 'string' && requestBody.length > 0) {
-            // 在非JSON请求体末尾添加注释格式的标记
-            requestBodyToSend = requestBody + "\n<!-- debug_marker: " + Date.now() + " -->";
-            console.log("DEBUG: 已添加HTML注释风格标记");
-          } else {
-            requestBodyToSend = requestBody;
-            console.log("DEBUG: 无法修改请求体，直接使用原始请求体");
-          }
-        }
-        
-        // 记录日志
-        await saveRequestLog(request, requestBody, requestBodyToSend);
-        
-        // 确保单独一行打印出来便于查看
-        console.log("\n\n");
-        console.log("============= 发送到目标的请求体 =============");
-        console.log(requestBodyToSend);
-        console.log("================================================");
-        console.log("\n\n");
       } catch (error) {
-        console.error("DEBUG: 读取请求体失败:", error);
+        console.error("读取请求体失败:", error);
       }
-    } else {
-      console.log(`DEBUG: 跳过请求体处理 (调试模式: ${state.isDebugMode}, 方法: ${request.method})`);
     }
 
-    console.log("DEBUG: 准备发送请求到目标服务器");
-    
     // 发送请求到目标服务器
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
       headers: headers,
-      body: requestBodyToSend !== null ? requestBodyToSend : request.body,
+      body: request.body,  // 使用原始请求体，不做任何修改
       redirect: 'follow'
     });
     
-    console.log(`DEBUG: 目标服务器响应状态: ${response.status}`);
+    console.log(`目标服务器响应状态: ${response.status}`);
     
     // 克隆响应以便读取响应体
     const responseClone = response.clone();
@@ -840,26 +785,22 @@ async function handleProxy(request: Request): Promise<Response> {
     try {
       // 读取响应体
       responseBody = await responseClone.text();
-      console.log("DEBUG: 成功读取响应体");
+      console.log("成功读取响应体");
       
       // 打印响应体
       if (responseBody) {
-        console.log("\n\n");
-        console.log("============= 目标服务器的响应内容 =============");
-        logFullContent("响应内容", responseBody);
-        console.log("================================================");
-        console.log("\n\n");
+        logFullContent("目标服务器的响应内容", responseBody);
       }
       
       // 保存日志，包括响应内容
-      if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
+      if (state.isDebugMode && requestBody) {
         await saveRequestLog(request, requestBody, responseBody, response.status);
       }
     } catch (error) {
-      console.error("DEBUG: 读取响应体失败:", error);
+      console.error("读取响应体失败:", error);
       
       // 即使失败也要保存日志，但不含响应内容
-      if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
+      if (state.isDebugMode && requestBody) {
         await saveRequestLog(request, requestBody, "无法读取响应内容", response.status);
       }
     }
@@ -876,7 +817,7 @@ async function handleProxy(request: Request): Promise<Response> {
     
     return proxyResponse;
   } catch (error) {
-    console.error('DEBUG: 代理请求失败:', error);
+    console.error('代理请求失败:', error);
     return new Response(JSON.stringify({
       error: '代理请求失败',
       message: error.message
