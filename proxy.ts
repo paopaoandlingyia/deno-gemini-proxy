@@ -25,8 +25,6 @@ const state = {
   isDebugMode: false, // 默认关闭调试模式
   logs: [] as RequestLog[], // 日志存储
   startTime: 0, // 调试模式开始时间
-  targetUrl: TARGET_URL, // 新增：当前代理目标
-  targetHistory: [] as string[], // 新增：历史代理目标记录
 };
 
 // 初始化KV存储
@@ -481,6 +479,11 @@ function getHtmlIndex(): string {
     <div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>
   </div>
 
+  <div class="proxy-target-form">
+    <input type="text" id="proxyTargetInput" placeholder="输入新的代理目标URL" value="${TARGET_URL}">
+    <button id="saveProxyTargetBtn">保存</button>
+  </div>
+
   <script>
     // 格式化时间戳
     function formatTimestamp(timestamp) {
@@ -748,6 +751,55 @@ function getHtmlIndex(): string {
     
     // 页面加载完成后初始化
     window.onload = init;
+
+    // 保存代理目标设置
+    async function saveProxyTarget() {
+      const targetInput = document.getElementById('proxyTargetInput');
+      const newTarget = targetInput.value.trim();
+      
+      if (!newTarget) {
+        alert('请输入有效的代理目标URL');
+        return;
+      }
+      
+      // 验证URL格式
+      try {
+        new URL(newTarget);
+      } catch (e) {
+        alert('请输入有效的URL格式（例如: https://example.com）');
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/proxy/target', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ targetUrl: newTarget })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+          alert('代理目标已成功更改');
+          // 更新状态栏显示
+          document.getElementById('statusInfo').innerHTML = \`反代目标: \${result.targetUrl}\`;
+          
+          // 如果当前在调试模式，也更新调试信息
+          if (document.getElementById('statusDot').classList.contains('active')) {
+            const statusResponse = await fetch('/api/debug/status');
+            const status = await statusResponse.json();
+            updateDebugStatus(status);
+          }
+        } else {
+          alert(\`更改失败: \${result.error}\`);
+        }
+      } catch (error) {
+        alert('操作失败，请重试');
+        console.error('保存代理目标失败:', error);
+      }
+    }
   </script>
 </body>
 </html>
@@ -870,6 +922,58 @@ async function handleLogsApi(request: Request): Promise<Response> {
   });
 }
 
+// 处理代理目标修改API
+async function handleProxyTargetApi(request: Request): Promise<Response> {
+  if (request.method === "POST") {
+    try {
+      const requestData = await request.json();
+      const newTargetUrl = requestData.targetUrl;
+      
+      // 验证URL格式
+      try {
+        new URL(newTargetUrl);
+      } catch (e) {
+        return new Response(JSON.stringify({ error: "无效的URL格式" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      // 更新全局设置
+      const oldTargetUrl = TARGET_URL;
+      TARGET_URL = newTargetUrl;
+      
+      // 如果启用了KV存储，也保存到KV
+      if (kv) {
+        await kv.set(["proxyConfig"], { targetUrl: newTargetUrl });
+      }
+      
+      console.log(`代理目标已从 ${oldTargetUrl} 更改为 ${newTargetUrl}`);
+      
+      return new Response(JSON.stringify({ 
+        success: true, 
+        message: "代理目标已更改",
+        targetUrl: newTargetUrl
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ 
+        error: "处理请求失败",
+        message: error.message 
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+  
+  return new Response(JSON.stringify({ error: "不支持的方法" }), {
+    status: 405,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
 // 处理代理转发
 async function handleProxy(request: Request): Promise<Response> {
   try {
@@ -979,56 +1083,6 @@ async function handleProxy(request: Request): Promise<Response> {
   }
 }
 
-// 处理代理目标更新
-async function handleProxyTargetUpdate(request: Request): Promise<Response> {
-  if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
-  }
-
-  try {
-    const { url } = await request.json();
-    
-    // 验证URL
-    const validUrl = new URL(url);
-    
-    // 更新代理目标
-    state.targetUrl = validUrl.toString();
-    
-    // 更新历史记录
-    if (!state.targetHistory.includes(state.targetUrl)) {
-      state.targetHistory.unshift(state.targetUrl);
-      // 限制历史记录数量
-      if (state.targetHistory.length > 10) {
-        state.targetHistory = state.targetHistory.slice(0, 10);
-      }
-    }
-
-    // 如果使用KV存储，保存设置
-    if (kv) {
-      await kv.set(["proxyConfig"], {
-        targetUrl: state.targetUrl,
-        targetHistory: state.targetHistory
-      });
-    }
-
-    return new Response(JSON.stringify({
-      success: true,
-      targetUrl: state.targetUrl,
-      targetHistory: state.targetHistory
-    }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  } catch (error) {
-    return new Response(JSON.stringify({
-      success: false,
-      error: "Invalid URL"
-    }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
-}
-
 // 请求处理函数
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -1067,9 +1121,9 @@ async function handleRequest(request: Request): Promise<Response> {
       return handleLogsApi(request);
     }
     
-    // 代理目标更新API
+    // 代理目标API
     if (path === "/api/proxy/target") {
-      return handleProxyTargetUpdate(request);
+      return handleProxyTargetApi(request);
     }
     
     // 未找到API路由
@@ -1093,6 +1147,13 @@ async function initState() {
         state.isDebugMode = debugState.value.isDebugMode;
         state.startTime = debugState.value.startTime;
         console.log(`从KV恢复调试状态: isDebugMode=${state.isDebugMode}, startTime=${state.startTime}`);
+      }
+      
+      // 从KV存储中恢复代理目标设置
+      const proxyConfig = await kv.get<{targetUrl: string}>(["proxyConfig"]);
+      if (proxyConfig?.value?.targetUrl) {
+        TARGET_URL = proxyConfig.value.targetUrl;
+        console.log(`从KV恢复代理目标: ${TARGET_URL}`);
       }
     } catch (error) {
       console.error("从KV恢复状态失败:", error);
@@ -1119,48 +1180,5 @@ Deno.serve({
   } catch (error) {
     console.error(`请求处理出错:`, error);
     return new Response("Internal Server Error", { status: 500 });
-  }
-});
-
-// 在现有的JavaScript代码中添加
-function updateProxyTarget() {
-  const input = document.getElementById('proxyTarget');
-  const url = input.value.trim();
-  
-  if (!url) {
-    alert('请输入有效的代理目标URL');
-    return;
-  }
-
-  fetch('/api/proxy/target', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ url })
-  })
-  .then(response => response.json())
-  .then(data => {
-    if (data.success) {
-      alert('代理目标更新成功');
-      // 更新历史记录下拉框
-      const select = document.getElementById('proxyHistory');
-      select.innerHTML = '<option value="">--- 历史记录 ---</option>' +
-        data.targetHistory.map(url => `<option value="${url}">${url}</option>`).join('');
-    } else {
-      alert('更新失败：' + data.error);
-    }
-  })
-  .catch(error => {
-    alert('更新失败，请检查URL格式是否正确');
-  });
-}
-
-// 绑定事件
-document.getElementById('updateProxyBtn').addEventListener('click', updateProxyTarget);
-document.getElementById('proxyHistory').addEventListener('change', function(e) {
-  const selected = e.target.value;
-  if (selected) {
-    document.getElementById('proxyTarget').value = selected;
   }
 });
