@@ -452,6 +452,53 @@ function getHtmlIndex(): string {
     .log-body-container:hover .copy-button {
       opacity: 0.8;
     }
+
+    .status-info-container {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+
+    .proxy-target-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .proxy-target-form input {
+      width: 300px;
+      padding: 6px 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+
+    .proxy-target-form button {
+      padding: 6px 12px;
+      margin: 0;
+    }
+
+    /* 响应式设计调整 */
+    @media (max-width: 768px) {
+      .status-bar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      
+      .status-info-container {
+        width: 100%;
+        align-items: flex-start;
+        margin-top: 10px;
+      }
+      
+      .proxy-target-form {
+        width: 100%;
+      }
+      
+      .proxy-target-form input {
+        flex-grow: 1;
+      }
+    }
   </style>
 </head>
 <body>
@@ -462,8 +509,14 @@ function getHtmlIndex(): string {
       <div id="statusDot" class="status-dot"></div>
       <span id="statusText">调试模式已关闭</span>
     </div>
-    <div class="status-info" id="statusInfo">
-      反代目标: ${TARGET_URL}
+    <div class="status-info-container">
+      <div class="status-info" id="statusInfo">
+        反代目标: ${TARGET_URL}
+      </div>
+      <div class="proxy-target-form">
+        <input type="text" id="proxyTargetInput" placeholder="输入新的代理目标URL" value="${TARGET_URL}">
+        <button id="saveProxyTargetBtn">保存</button>
+      </div>
     </div>
   </div>
   
@@ -477,11 +530,6 @@ function getHtmlIndex(): string {
   
   <div id="logList" class="log-list">
     <div class="empty-state">调试模式已关闭，开启后将在此显示请求日志</div>
-  </div>
-
-  <div class="proxy-target-form">
-    <input type="text" id="proxyTargetInput" placeholder="输入新的代理目标URL" value="${TARGET_URL}">
-    <button id="saveProxyTargetBtn">保存</button>
   </div>
 
   <script>
@@ -599,6 +647,9 @@ function getHtmlIndex(): string {
           window.durationTimer = null;
         }
       }
+      
+      // 同时更新输入框的值，确保它与当前代理目标一致
+      document.getElementById('proxyTargetInput').value = status.targetUrl || TARGET_URL;
     }
     
     // 复制文本到剪贴板
@@ -748,6 +799,7 @@ function getHtmlIndex(): string {
     document.getElementById('toggleBtn').addEventListener('click', toggleDebugMode);
     document.getElementById('refreshBtn').addEventListener('click', loadLogs);
     document.getElementById('clearBtn').addEventListener('click', clearLogs);
+    document.getElementById('saveProxyTargetBtn').addEventListener('click', saveProxyTarget);
     
     // 页面加载完成后初始化
     window.onload = init;
@@ -782,15 +834,29 @@ function getHtmlIndex(): string {
         const result = await response.json();
         
         if (result.success) {
+          // 立即更新状态栏和输入框显示
+          const targetUrl = result.targetUrl;
+          document.getElementById('statusInfo').innerHTML = \`反代目标: \${targetUrl}\`;
+          document.getElementById('proxyTargetInput').value = targetUrl;
+          
           alert('代理目标已成功更改');
-          // 更新状态栏显示
-          document.getElementById('statusInfo').innerHTML = \`反代目标: \${result.targetUrl}\`;
           
           // 如果当前在调试模式，也更新调试信息
           if (document.getElementById('statusDot').classList.contains('active')) {
             const statusResponse = await fetch('/api/debug/status');
             const status = await statusResponse.json();
             updateDebugStatus(status);
+          }
+          
+          // 在handleProxyTargetApi函数中，确保KV存储代码正确执行
+          if (kv) {
+            try {
+              await kv.set(["proxyConfig"], { targetUrl: newTarget });
+              console.log(\`代理目标已保存到KV: \${newTarget}\`);
+            } catch (kvError) {
+              console.error("保存代理目标到KV失败:", kvError);
+              // 继续执行，即使KV保存失败也允许代理目标变更
+            }
           }
         } else {
           alert(\`更改失败: \${result.error}\`);
@@ -826,7 +892,8 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
       startTime: state.startTime,
-      logCount: logCount
+      logCount: logCount,
+      targetUrl: TARGET_URL
     }), {
       headers: { "Content-Type": "application/json" }
     });
@@ -878,7 +945,8 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
       startTime: state.startTime,
-      logCount: logCount
+      logCount: logCount,
+      targetUrl: TARGET_URL
     }), {
       headers: { "Content-Type": "application/json" }
     });
