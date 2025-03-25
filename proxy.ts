@@ -25,6 +25,8 @@ const state = {
   isDebugMode: false, // 默认关闭调试模式
   logs: [] as RequestLog[], // 日志存储
   startTime: 0, // 调试模式开始时间
+  targetUrl: TARGET_URL, // 新增：当前代理目标
+  targetHistory: [] as string[], // 新增：历史代理目标记录
 };
 
 // 初始化KV存储
@@ -977,6 +979,56 @@ async function handleProxy(request: Request): Promise<Response> {
   }
 }
 
+// 处理代理目标更新
+async function handleProxyTargetUpdate(request: Request): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  try {
+    const { url } = await request.json();
+    
+    // 验证URL
+    const validUrl = new URL(url);
+    
+    // 更新代理目标
+    state.targetUrl = validUrl.toString();
+    
+    // 更新历史记录
+    if (!state.targetHistory.includes(state.targetUrl)) {
+      state.targetHistory.unshift(state.targetUrl);
+      // 限制历史记录数量
+      if (state.targetHistory.length > 10) {
+        state.targetHistory = state.targetHistory.slice(0, 10);
+      }
+    }
+
+    // 如果使用KV存储，保存设置
+    if (kv) {
+      await kv.set(["proxyConfig"], {
+        targetUrl: state.targetUrl,
+        targetHistory: state.targetHistory
+      });
+    }
+
+    return new Response(JSON.stringify({
+      success: true,
+      targetUrl: state.targetUrl,
+      targetHistory: state.targetHistory
+    }), {
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: "Invalid URL"
+    }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+
 // 请求处理函数
 async function handleRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -1013,6 +1065,11 @@ async function handleRequest(request: Request): Promise<Response> {
     // 日志API
     if (path === "/api/logs") {
       return handleLogsApi(request);
+    }
+    
+    // 代理目标更新API
+    if (path === "/api/proxy/target") {
+      return handleProxyTargetUpdate(request);
     }
     
     // 未找到API路由
@@ -1062,5 +1119,48 @@ Deno.serve({
   } catch (error) {
     console.error(`请求处理出错:`, error);
     return new Response("Internal Server Error", { status: 500 });
+  }
+});
+
+// 在现有的JavaScript代码中添加
+function updateProxyTarget() {
+  const input = document.getElementById('proxyTarget');
+  const url = input.value.trim();
+  
+  if (!url) {
+    alert('请输入有效的代理目标URL');
+    return;
+  }
+
+  fetch('/api/proxy/target', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ url })
+  })
+  .then(response => response.json())
+  .then(data => {
+    if (data.success) {
+      alert('代理目标更新成功');
+      // 更新历史记录下拉框
+      const select = document.getElementById('proxyHistory');
+      select.innerHTML = '<option value="">--- 历史记录 ---</option>' +
+        data.targetHistory.map(url => `<option value="${url}">${url}</option>`).join('');
+    } else {
+      alert('更新失败：' + data.error);
+    }
+  })
+  .catch(error => {
+    alert('更新失败，请检查URL格式是否正确');
+  });
+}
+
+// 绑定事件
+document.getElementById('updateProxyBtn').addEventListener('click', updateProxyTarget);
+document.getElementById('proxyHistory').addEventListener('change', function(e) {
+  const selected = e.target.value;
+  if (selected) {
+    document.getElementById('proxyTarget').value = selected;
   }
 });
