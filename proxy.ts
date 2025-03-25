@@ -24,7 +24,6 @@ interface RequestLog {
 const state = {
   isDebugMode: false, // 默认关闭调试模式
   logs: [] as RequestLog[], // 日志存储
-  startTime: 0, // 调试模式开始时间
 };
 
 // 初始化KV存储
@@ -36,6 +35,10 @@ if (ENABLE_KV_STORAGE) {
     console.error("KV存储初始化失败:", error);
   }
 }
+
+// 统一使用一个常量
+const KV_EXPIRATION_MS = 12 * 60 * 60 * 1000; // 12小时
+const expireAt = new Date(Date.now() + KV_EXPIRATION_MS);
 
 // 添加分段日志函数
 function logFullContent(prefix: string, content: string) {
@@ -129,9 +132,10 @@ async function saveRequestLog(
   // 如果启用了KV存储，也保存到KV
   if (kv) {
     try {
-      // 设置10分钟过期时间
-      const expirationMs = 10 * 60 * 1000; // 10分钟
-      const expireAt = new Date(Date.now() + expirationMs);
+      // 应用到所有KV存储
+      await kv.set(["debugState"], {
+        isDebugMode: true,
+      }, { expireAt });
       
       // 先获取现有的logIds，防止并发问题
       const existingLogIds = await kv.get<string[]>(["logIds"]);
@@ -547,25 +551,6 @@ function getHtmlIndex(): string {
       });
     }
     
-    // 格式化时间差
-    function formatDuration(startTime) {
-      const duration = Math.floor((Date.now() - startTime) / 1000);
-      const hours = Math.floor(duration / 3600);
-      const minutes = Math.floor((duration % 3600) / 60);
-      const seconds = duration % 60;
-      
-      let result = '';
-      if (hours > 0) {
-        result += hours + '小时';
-      }
-      if (minutes > 0 || hours > 0) {
-        result += minutes + '分';
-      }
-      result += seconds + '秒';
-      
-      return result;
-    }
-    
     // 格式化请求体
     function formatBody(body) {
       if (!body) return '无内容';
@@ -627,24 +612,12 @@ function getHtmlIndex(): string {
         toggleBtn.classList.add('toggle-off');
         
         statusInfo.innerHTML = \`反代目标: \${status.targetUrl}<br>已记录 \${status.logCount} 个请求\`;
-        
-        // 清除定时器如果存在
-        if (window.durationTimer) {
-          clearInterval(window.durationTimer);
-          window.durationTimer = null;
-        }
       } else {
         statusDot.classList.remove('active');
         statusText.textContent = '调试模式已关闭';
         toggleBtn.textContent = '开启调试';
         toggleBtn.classList.remove('toggle-off');
         statusInfo.innerHTML = \`反代目标: \${status.targetUrl}\`;
-        
-        // 清除定时器
-        if (window.durationTimer) {
-          clearInterval(window.durationTimer);
-          window.durationTimer = null;
-        }
       }
       
       // 同时更新输入框的值，确保它与当前代理目标一致
@@ -879,7 +852,6 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
-      startTime: state.startTime,
       logCount: logCount,
       targetUrl: TARGET_URL
     }), {
@@ -892,27 +864,18 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     state.isDebugMode = !state.isDebugMode;
     
     if (state.isDebugMode) {
-      state.startTime = Date.now();
-      
       // 如果使用KV存储，也保存调试状态
       if (kv) {
-        // 调试状态设置较长过期时间，如12小时
-        const expirationMs = 12 * 60 * 60 * 1000; 
-        const expireAt = new Date(Date.now() + expirationMs);
-        
+        // 应用到所有KV存储
         await kv.set(["debugState"], {
           isDebugMode: true,
-          startTime: state.startTime
         }, { expireAt });
       }
     } else {
-      state.startTime = 0;
-      
       // 如果使用KV存储，更新调试状态
       if (kv) {
         await kv.set(["debugState"], {
-          isDebugMode: false,
-          startTime: 0
+          isDebugMode: false
         });
       }
     }
@@ -932,7 +895,6 @@ async function handleDebugApi(request: Request, path: string): Promise<Response>
     
     return new Response(JSON.stringify({
       isDebugMode: state.isDebugMode,
-      startTime: state.startTime,
       logCount: logCount,
       targetUrl: TARGET_URL
     }), {
@@ -1198,11 +1160,10 @@ async function initState() {
   if (kv) {
     try {
       // 从KV存储中恢复调试状态
-      const debugState = await kv.get<{isDebugMode: boolean, startTime: number}>(["debugState"]);
+      const debugState = await kv.get<{isDebugMode: boolean}>(["debugState"]);
       if (debugState?.value) {
         state.isDebugMode = debugState.value.isDebugMode;
-        state.startTime = debugState.value.startTime;
-        console.log(`从KV恢复调试状态: isDebugMode=${state.isDebugMode}, startTime=${state.startTime}`);
+        console.log(`从KV恢复调试状态: isDebugMode=${state.isDebugMode}`);
       }
       
       // 从KV存储中恢复代理目标设置
