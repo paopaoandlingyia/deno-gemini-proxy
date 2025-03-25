@@ -2,7 +2,7 @@
 import { serve } from "https://deno.land/std@0.220.1/http/server.ts";
 
 // 配置
-const TARGET_URL = Deno.env.get("TARGET_URL") || "https://generativelanguage.googleapis.com"; // 默认反代目标
+let TARGET_URL = Deno.env.get("TARGET_URL") || "https://generativelanguage.googleapis.com"; // 默认反代目标
 const MAX_LOGS = 100; // 最大保存日志数量
 const ENABLE_KV_STORAGE = true; // 是否启用KV存储，可以在不同实例间共享日志
 
@@ -626,8 +626,7 @@ function getHtmlIndex(): string {
         toggleBtn.textContent = '关闭调试';
         toggleBtn.classList.add('toggle-off');
         
-        // 简化状态显示，只显示记录数和目标URL
-        statusInfo.innerHTML = \`反代目标: ${TARGET_URL}<br>已记录 \${status.logCount} 个请求\`;
+        statusInfo.innerHTML = \`反代目标: \${status.targetUrl}<br>已记录 \${status.logCount} 个请求\`;
         
         // 清除定时器如果存在
         if (window.durationTimer) {
@@ -639,7 +638,7 @@ function getHtmlIndex(): string {
         statusText.textContent = '调试模式已关闭';
         toggleBtn.textContent = '开启调试';
         toggleBtn.classList.remove('toggle-off');
-        statusInfo.innerHTML = \`反代目标: ${TARGET_URL}\`;
+        statusInfo.innerHTML = \`反代目标: \${status.targetUrl}\`;
         
         // 清除定时器
         if (window.durationTimer) {
@@ -846,17 +845,6 @@ function getHtmlIndex(): string {
             const statusResponse = await fetch('/api/debug/status');
             const status = await statusResponse.json();
             updateDebugStatus(status);
-          }
-          
-          // 在handleProxyTargetApi函数中，确保KV存储代码正确执行
-          if (kv) {
-            try {
-              await kv.set(["proxyConfig"], { targetUrl: newTarget });
-              console.log(\`代理目标已保存到KV: \${newTarget}\`);
-            } catch (kvError) {
-              console.error("保存代理目标到KV失败:", kvError);
-              // 继续执行，即使KV保存失败也允许代理目标变更
-            }
           }
         } else {
           alert(\`更改失败: \${result.error}\`);
