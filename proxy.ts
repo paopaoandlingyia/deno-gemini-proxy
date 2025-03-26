@@ -197,18 +197,27 @@ async function clearAllRequestLogs(): Promise<boolean> {
     
     // 如果启用了KV存储，也清除KV中的日志
     if (kv) {
-      const logIds = await kv.get<string[]>(["logIds"]);
-      if (logIds?.value) {
-        // 删除所有日志条目
-        for (const id of logIds.value) {
-          await kv.delete(["logs", id]);
+      try {
+        // 清空日志ID列表
+        await kv.delete(["logIds"]);
+        
+        // 直接扫描并删除所有logs前缀的键
+        const logEntries = kv.list({ prefix: ["logs"] });
+        for await (const entry of logEntries) {
+          await kv.delete(entry.key);
         }
+        
+        // 更新调试状态，但保持isDebugMode的值不变
+        await kv.set(["debugState"], {
+          isDebugMode: state.isDebugMode,
+        }, { expireAt });
+        
+      } catch (error) {
+        console.error("KV操作失败:", error);
+        return false;
       }
-      // 清空日志ID列表
-      await kv.delete(["logIds"]);
     }
     
-    console.log("已清除所有请求日志");
     return true;
   } catch (error) {
     console.error("清除请求日志失败:", error);
