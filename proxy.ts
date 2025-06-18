@@ -92,79 +92,98 @@ function compressContent(content: string): string {
 }
 
 // 保存请求日志到内存或KV存储
+// 定义一个安全的KV存储大小限制 (Deno KV是64KB，我们留一些余量)
+const KV_VALUE_SIZE_LIMIT = 60 * 1024; // 60KB
+
+// 辅助函数：用于截断字符串
+function truncateString(str: string | undefined, maxLength: number): string | undefined {
+  if (!str || str.length <= maxLength) {
+    return str;
+  }
+  return str.substring(0, maxLength) + `... [内容已截断, 原长度: ${str.length}]`;
+}
+
+
+// 保存请求日志到内存或KV存储
 async function saveRequestLog(
   request: Request, 
   requestBody: string, 
   responseBody?: string,
   responseStatus?: number
 ) {
-  if (!state.isDebugMode) return null; // 不在调试模式，不保存日志
+  if (!state.isDebugMode) return null;
   
   const timestamp = Date.now();
   const requestId = `${timestamp}-${Math.random().toString(36).substring(2, 15)}`;
   const url = new URL(request.url);
   
-  // 压缩请求体和响应体
   const compressedRequestBody = compressContent(requestBody);
   const compressedResponseBody = responseBody ? compressContent(responseBody) : undefined;
   
-  const logEntry: RequestLog = {
+  // 1. 创建完整的日志条目，用于保存在内存中
+  const fullLogEntry: RequestLog = {
     id: requestId,
     timestamp,
     method: request.method,
     url: request.url,
     path: url.pathname,
     headers: Object.fromEntries(request.headers.entries()),
-    body: compressedRequestBody, // 使用压缩后的请求体
-    responseBody: compressedResponseBody, // 使用压缩后的响应体
+    body: compressedRequestBody,
+    responseBody: compressedResponseBody,
     responseStatus,
     clientIP: request.headers.get("x-forwarded-for") || "unknown"
   };
   
-  // 保存到内存
-  state.logs.unshift(logEntry);
-  
-  // 保持日志数不超过最大值
+  // 2. 总是先保存到内存
+  state.logs.unshift(fullLogEntry);
   if (state.logs.length > MAX_LOGS) {
     state.logs = state.logs.slice(0, MAX_LOGS);
   }
   
-  // 如果启用了KV存储，也保存到KV
+  // 3. 如果启用了KV，准备一个可能被截断的副本进行存储
   if (kv) {
     try {
-      // 应用到所有KV存储
-      await kv.set(["debugState"], {
-        isDebugMode: true,
-      }, { expireAt });
-      
-      // 先获取现有的logIds，防止并发问题
+      // 创建一个用于KV存储的副本
+      const kvLogEntry = { ...fullLogEntry };
+
+      // 检查并截断 body 和 responseBody 以符合KV大小限制
+      // 我们大致估算，给其他字段留出2KB空间
+      const remainingSpace = KV_VALUE_SIZE_LIMIT - 2048;
+      const bodyMax = Math.floor(remainingSpace / 2);
+      const responseMax = Math.floor(remainingSpace / 2);
+
+      kvLogEntry.body = truncateString(kvLogEntry.body, bodyMax) || "";
+      kvLogEntry.responseBody = truncateString(kvLogEntry.responseBody, responseMax);
+
+      // 先获取现有的logIds
       const existingLogIds = await kv.get<string[]>(["logIds"]);
-      let newLogIds = [requestId];
+      let newLogIds = [requestId, ...(existingLogIds?.value || [])].slice(0, MAX_LOGS);
       
-      if (existingLogIds?.value) {
-        // 确保不重复添加
-        if (!existingLogIds.value.includes(requestId)) {
-          newLogIds = [requestId, ...existingLogIds.value].slice(0, MAX_LOGS);
-        } else {
-          newLogIds = existingLogIds.value;
-        }
+      // 使用原子操作来确保一致性
+      const atomicOp = kv.atomic()
+        .set(["logs", requestId], kvLogEntry, { expireAt })
+        .set(["logIds"], newLogIds, { expireAt })
+        .set(["debugState"], { isDebugMode: true }, { expireAt });
+        
+      const res = await atomicOp.commit();
+
+      if (res.ok) {
+         console.log(`日志已保存到KV存储: ${requestId} (可能已截断), 当前总数: ${newLogIds.length}`);
+      } else {
+         throw new Error("KV原子操作提交失败");
       }
-      
-      // 保存日志内容
-      await kv.set(["logs", requestId], logEntry, { expireAt });
-      
-      // 更新日志ID列表
-      await kv.set(["logIds"], newLogIds, { expireAt });
-      
-      console.log(`日志已保存到KV存储: ${requestId}，当前总数: ${newLogIds.length}，将在${expireAt.toLocaleString()}过期`);
+
     } catch (error) {
-      console.error("保存日志到KV存储失败:", error);
+      console.error(`保存日志 ${requestId} 到KV存储失败:`, error);
+      // 注意：即使KV失败，日志依然存在于内存中。
+      // 这会导致不一致，下面的API修改将解决这个问题。
     }
   }
   
   console.log(`保存请求日志: ${requestId}`);
   return requestId;
 }
+
 
 // 从KV存储获取日志
 async function getLogsFromKV(): Promise<RequestLog[]> {
