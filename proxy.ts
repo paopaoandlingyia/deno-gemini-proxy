@@ -1007,94 +1007,95 @@ async function handleProxy(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
     
-    // 只在调试模式下记录详细日志
-    if (state.isDebugMode) {
-      console.log(`转发请求到: ${targetUrl.toString()}`);
-    }
-    
-    // 创建代理请求
-    const headers = new Headers(request.headers);
-    headers.delete('host'); // 删除host头，以防干扰目标服务器
-    
-    // 只在调试模式下记录请求头
-    if (state.isDebugMode) {
-      console.log("--- 向目标服务器发送的请求头 ---");
-      headers.forEach((value, key) => {
-        console.log(`${key}: ${value}`);
+    // 只在调试模式下才执行详细的日志记录和处理
+    if (!state.isDebugMode) {
+      // 如果非调试模式，直接转发，不进行任何日志记录
+      return fetch(targetUrl.toString(), {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        redirect: 'follow'
       });
-      console.log("--- 请求头记录结束 ---");
-    }
-    
-    // 如果需要记录请求体内容，只在调试模式下执行
-    let requestBody = "";
-    
-    if (state.isDebugMode && request.method !== "GET" && request.method !== "HEAD") {
-      try {
-        // 读取请求体
-        const requestClone = request.clone();
-        requestBody = await requestClone.text();
-        
-        // 记录原始请求内容
-        logFullContent("原始请求体", requestBody);
-      } catch (error) {
-        console.error("读取请求体失败:", error);
-      }
     }
 
-    // 发送请求到目标服务器
+    // --- 以下为调试模式下的逻辑 ---
+    console.log(`[调试模式] 转发请求到: ${targetUrl.toString()}`);
+
+    // 克隆请求以备后续操作
+    const requestForLog = request.clone();
+    
+    let requestBodyText = "[请求体未读取或非文本类型]";
+    let loggable = true; // 默认所有请求都应被记录
+
+    if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
+      try {
+        console.log("[调试模式] 尝试读取请求体...");
+        const bodyBuffer = await request.clone().arrayBuffer();
+        // 尝试用UTF-8解码，如果失败则认为是二进制
+        if (bodyBuffer.byteLength > 0) {
+            try {
+                requestBodyText = new TextDecoder("utf-8", { fatal: true }).decode(bodyBuffer);
+                console.log("[调试模式] 请求体读取成功 (文本)。");
+                logFullContent("原始请求体", requestBodyText);
+            } catch {
+                requestBodyText = `[二进制请求体, 大小: ${bodyBuffer.byteLength} 字节]`;
+                console.log("[调试模式] 请求体读取为二进制。");
+            }
+        } else {
+            requestBodyText = "[请求体为空]";
+            console.log("[调试模式] 请求体为空。");
+        }
+      } catch (error) {
+        requestBodyText = `[!!! 读取请求体失败: ${error.message}]`;
+        console.error("[调试模式] 读取请求体时发生严重错误:", error);
+      }
+    } else {
+      requestBodyText = "[无请求体 (GET/HEAD 或 body 为空)]";
+    }
+
+    // 发送请求到目标服务器 (使用原始的 request 对象)
     const response = await fetch(targetUrl.toString(), {
       method: request.method,
-      headers: headers,
+      headers: request.headers,
       body: request.body,
       redirect: 'follow'
     });
     
-    // 只在调试模式下记录响应状态
-    if (state.isDebugMode) {
-      console.log(`目标服务器响应状态: ${response.status}`);
+    console.log(`[调试模式] 目标服务器响应状态: ${response.status}`);
+    
+    // 准备记录响应体
+    let responseBodyText = "[响应体未读取]";
+    const responseClone = response.clone();
+
+    try {
+        const bodyBuffer = await responseClone.arrayBuffer();
+        if (bodyBuffer.byteLength > 0) {
+            try {
+                responseBodyText = new TextDecoder("utf-8", { fatal: true }).decode(bodyBuffer);
+                logFullContent("目标服务器的响应内容", responseBodyText);
+            } catch {
+                responseBodyText = `[二进制响应体, 大小: ${bodyBuffer.byteLength} 字节]`;
+            }
+        } else {
+            responseBodyText = "[响应体为空]";
+        }
+    } catch (error) {
+        responseBodyText = `[!!! 读取响应体失败: ${error.message}]`;
+        console.error("[调试模式] 读取响应体失败:", error);
     }
     
-    // 只在调试模式下读取和记录响应体
-    let responseBody = "";
-    if (state.isDebugMode) {
-      // 克隆响应以便读取响应体
-      const responseClone = response.clone();
-      
-      try {
-        // 读取响应体
-        responseBody = await responseClone.text();
-        console.log("成功读取响应体");
-        
-        // 打印响应体
-        if (responseBody) {
-          logFullContent("目标服务器的响应内容", responseBody);
-        }
-        
-        // 保存日志，包括响应内容
-        if (requestBody) {
-          await saveRequestLog(request, requestBody, responseBody, response.status);
-        }
-      } catch (error) {
-        console.error("读取响应体失败:", error);
-        
-        // 即使失败也要保存日志，但不含响应内容
-        if (requestBody) {
-          await saveRequestLog(request, requestBody, "无法读取响应内容", response.status);
-        }
-      }
+    // **关键修改：无论如何都保存日志**
+    if (loggable) {
+      await saveRequestLog(requestForLog, requestBodyText, responseBodyText, response.status);
     }
     
-    // 构建响应
-    const proxyResponse = new Response(response.body, {
+    // 返回克隆的响应，因为原始响应的 body 可能已被读取
+    return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
       headers: new Headers(response.headers)
     });
-    
-    // 添加CORS头
-    proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
-    
-    return proxyResponse;
+
   } catch (error) {
     console.error('代理请求失败:', error);
     return new Response(JSON.stringify({
@@ -1109,6 +1110,7 @@ async function handleProxy(request: Request): Promise<Response> {
     });
   }
 }
+
 
 // 请求处理函数
 async function handleRequest(request: Request): Promise<Response> {
